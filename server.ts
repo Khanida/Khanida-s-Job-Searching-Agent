@@ -3,9 +3,11 @@ import express from 'express';
 import type { Request, Response } from 'express';
 import path from 'node:path';
 import fs from 'node:fs';
+import zlib from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
 import multer from 'multer';
 import JSZip from 'jszip';
+import { extractText, getDocumentProxy } from 'unpdf';
 import { createServer as createViteServer } from 'vite';
 import {
   analyzeCv,
@@ -13,10 +15,14 @@ import {
   computeLearnedBoost,
   generateApplicationMaterials,
   googleCareersSearchUrl,
+  parseCvSections,
   REJECTION_REASON_LABELS,
+  recalibrateScoresFromWeights,
   recordInteraction,
   runJuryDeliberation,
+  sanitizeCvText,
 } from './server/agentEngine.ts';
+import { syncAllJobSources } from './server/jobSources.ts';
 import type {
   AgentArgument,
   ApplicationDraft,
@@ -121,7 +127,7 @@ function getProfileRow(): CandidateProfile {
     degree: String(row.degree || ''),
     skills: String(row.skills || ''),
     target_roles: String(row.target_roles || ''),
-    cv_text: String(row.cv_text || ''),
+    cv_text: sanitizeCvText(String(row.cv_text || '')),
     cv_filename: row.cv_filename ? String(row.cv_filename) : null,
     cv_uploaded_at: row.cv_uploaded_at ? String(row.cv_uploaded_at) : null,
     cv_analysis: parsedAnalysis,
@@ -132,29 +138,174 @@ function getProfileRow(): CandidateProfile {
   };
 }
 
+const EXPIRED_LIVENESS_SQL = "liveness_status IN ('expired', 'unavailable')";
+const NOT_EXPIRED_LIVENESS_SQL = "(liveness_status IS NULL OR liveness_status NOT IN ('expired', 'unavailable'))";
+
 function getStats() {
   const totalRaw = Number((db.prepare('SELECT COUNT(*) as c FROM jobs').get() as { c: number }).c);
-  const shortlistedCount = Number((db.prepare("SELECT COUNT(*) as c FROM jobs WHERE status='shortlisted'").get() as { c: number }).c);
+  const shortlistedCount = Number(
+    (
+      db
+        .prepare(`SELECT COUNT(*) as c FROM jobs WHERE status='shortlisted' AND ${NOT_EXPIRED_LIVENESS_SQL}`)
+        .get() as { c: number }
+    ).c
+  );
   const appliedCount = Number((db.prepare("SELECT COUNT(*) as c FROM jobs WHERE status='applied'").get() as { c: number }).c);
-  const newCount = Number((db.prepare("SELECT COUNT(*) as c FROM jobs WHERE status='new'").get() as { c: number }).c);
+  const newCount = Number(
+    (
+      db
+        .prepare(`SELECT COUNT(*) as c FROM jobs WHERE status='new' AND ${NOT_EXPIRED_LIVENESS_SQL}`)
+        .get() as { c: number }
+    ).c
+  );
+  const expiredCount = Number(
+    (
+      db
+        .prepare(`SELECT COUNT(*) as c FROM jobs WHERE status NOT IN ('dismissed', 'applied') AND ${EXPIRED_LIVENESS_SQL}`)
+        .get() as { c: number }
+    ).c
+  );
   const dismissedCount = Number((db.prepare("SELECT COUNT(*) as c FROM jobs WHERE status='dismissed'").get() as { c: number }).c);
-  const dailyPicksCount = Number((db.prepare("SELECT COUNT(*) as c FROM jobs WHERE is_daily_pick=1 AND status != 'dismissed'").get() as { c: number }).c);
+  const activeCount = Number(
+    (
+      db
+        .prepare(
+          `SELECT COUNT(*) as c FROM jobs WHERE status != 'dismissed' AND (status = 'applied' OR ${NOT_EXPIRED_LIVENESS_SQL})`
+        )
+        .get() as { c: number }
+    ).c
+  );
+  const dailyPicksCount = Number(
+    (
+      db
+        .prepare(
+          `SELECT COUNT(*) as c FROM jobs WHERE is_daily_pick=1 AND status != 'dismissed' AND ${NOT_EXPIRED_LIVENESS_SQL}`
+        )
+        .get() as { c: number }
+    ).c
+  );
   const liveCount = Number((db.prepare("SELECT COUNT(*) as c FROM jobs WHERE liveness_status='live' AND status != 'dismissed'").get() as { c: number }).c);
   const sources = db
-    .prepare("SELECT source, COUNT(*) as count FROM jobs WHERE status != 'dismissed' GROUP BY source ORDER BY count DESC")
+    .prepare(
+      `SELECT source, COUNT(*) as count FROM jobs WHERE status != 'dismissed' AND (status = 'applied' OR ${NOT_EXPIRED_LIVENESS_SQL}) GROUP BY source ORDER BY count DESC`
+    )
     .all() as Array<{ source: string; count: number }>;
 
   return {
     totalRaw,
-    activeCount: totalRaw - dismissedCount,
+    activeCount,
     dailyPicksCount,
     shortlistedCount,
     appliedCount,
     newCount,
+    expiredCount,
     dismissedCount,
     liveCount,
     sources,
   };
+}
+
+function formatShortLabel(isoOrDate: string, fallbackIndex?: number): string {
+  const parsed = Date.parse(isoOrDate);
+  if (!Number.isNaN(parsed)) {
+    const d = new Date(parsed);
+    const mon = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const hm = d.toTimeString().slice(0, 5);
+    return `${mon} ${hm}`;
+  }
+  return fallbackIndex ? `Round ${fallbackIndex}` : String(isoOrDate).slice(0, 16) || 'Latest';
+}
+
+function getJuryDecisionSnapshot() {
+  const stats = getStats();
+  const latest = (db
+    .prepare('SELECT id, session_date, created_at FROM deliberations ORDER BY created_at DESC LIMIT 1')
+    .get() || null) as { id: string; session_date: string; created_at: string } | null;
+
+  const matchRow = db
+    .prepare(
+      `SELECT COUNT(*) as c, COALESCE(AVG(jury_score), 0) as avgScore, COALESCE(MAX(jury_score), 0) as topScore
+       FROM jobs
+       WHERE status != 'dismissed' AND ${NOT_EXPIRED_LIVENESS_SQL} AND jury_score >= 55`
+    )
+    .get() as { c: number; avgScore: number; topScore: number };
+
+  const fallbackRow = db
+    .prepare(
+      `SELECT COALESCE(AVG(jury_score), 0) as avgScore, COALESCE(MAX(jury_score), 0) as topScore
+       FROM (
+         SELECT jury_score FROM jobs
+         WHERE status != 'dismissed' AND ${NOT_EXPIRED_LIVENESS_SQL}
+         ORDER BY jury_score DESC LIMIT 20
+       )`
+    )
+    .get() as { avgScore: number; topScore: number };
+
+  const avgScore = Math.round(Number(matchRow.c > 0 ? matchRow.avgScore : fallbackRow.avgScore || 0));
+  const topScore = Math.round(Number(matchRow.c > 0 ? matchRow.topScore : fallbackRow.topScore || 0));
+  const sessionId = (latest?.id || `session_${new Date().toISOString().slice(0, 10).replace(/-/g, '')}`).replace(
+    /[^a-zA-Z0-9_-]/g,
+    '_'
+  );
+  const sessionDate = latest?.session_date || new Date().toISOString().slice(0, 10);
+  const label = formatShortLabel(latest?.created_at || new Date().toISOString());
+
+  return {
+    sessionId,
+    sessionDate,
+    label,
+    reviewedCount: stats.activeCount + stats.dismissedCount,
+    matchedCount: Number(matchRow.c || 0),
+    dailyPicksCount: stats.dailyPicksCount,
+    shortlistedCount: stats.shortlistedCount,
+    dismissedCount: stats.dismissedCount,
+    avgMatchScore: Math.max(0, Math.min(100, avgScore)),
+    topMatchScore: Math.max(0, Math.min(100, topScore)),
+  };
+}
+
+function getJuryDecisionHistory() {
+  const stats = getStats();
+  const rows = db
+    .prepare(
+      `SELECT d.id, d.session_date, d.top_picks_count, d.created_at,
+              COUNT(v.id) as reviewed_count,
+              SUM(CASE WHEN v.consensus_score >= 55 THEN 1 ELSE 0 END) as matched_count,
+              COALESCE(AVG(CASE WHEN v.consensus_score >= 55 THEN v.consensus_score END), AVG(v.consensus_score), 0) as avg_score,
+              COALESCE(MAX(v.consensus_score), 0) as top_score
+       FROM deliberations d
+       LEFT JOIN jury_verdicts v ON v.deliberation_id = d.id
+       GROUP BY d.id
+       ORDER BY d.created_at ASC
+       LIMIT 24`
+    )
+    .all() as Array<{
+    id: string;
+    session_date: string;
+    top_picks_count: number;
+    created_at: string;
+    reviewed_count: number;
+    matched_count: number;
+    avg_score: number;
+    top_score: number;
+  }>;
+
+  if (!rows.length) {
+    return [getJuryDecisionSnapshot()];
+  }
+
+  return rows.map((r, idx) => ({
+    sessionId: String(r.id).replace(/[^a-zA-Z0-9_-]/g, '_'),
+    sessionDate: String(r.session_date || new Date().toISOString().slice(0, 10)),
+    label: formatShortLabel(r.created_at || r.session_date, idx + 1),
+    reviewedCount: Number(r.reviewed_count || stats.activeCount),
+    matchedCount: Number(r.matched_count || 0),
+    dailyPicksCount: Number(r.top_picks_count || stats.dailyPicksCount),
+    shortlistedCount: stats.shortlistedCount,
+    dismissedCount: stats.dismissedCount,
+    avgMatchScore: Math.max(0, Math.min(100, Math.round(Number(r.avg_score || 0)))),
+    topMatchScore: Math.max(0, Math.min(100, Math.round(Number(r.top_score || 0)))),
+  }));
 }
 
 function enrichJob(job: JobItem): JobItem {
@@ -216,8 +367,13 @@ app.get('/api/dashboard', (req: Request, res: Response) => {
   const params: Array<string | number> = [];
 
   if (status === 'all') {
-    whereParts.push("status != 'dismissed'");
-  } else if (['new', 'shortlisted', 'applied', 'dismissed'].includes(status)) {
+    whereParts.push(`status != 'dismissed' AND (status = 'applied' OR ${NOT_EXPIRED_LIVENESS_SQL})`);
+  } else if (status === 'expired') {
+    whereParts.push(`status NOT IN ('dismissed', 'applied') AND ${EXPIRED_LIVENESS_SQL}`);
+  } else if (status === 'new' || status === 'shortlisted') {
+    whereParts.push(`status = ? AND ${NOT_EXPIRED_LIVENESS_SQL}`);
+    params.push(status);
+  } else if (status === 'applied' || status === 'dismissed') {
     whereParts.push('status = ?');
     params.push(status);
   }
@@ -227,10 +383,12 @@ app.get('/api/dashboard', (req: Request, res: Response) => {
     params.push(source);
   }
 
-  if (liveness === 'live') {
-    whereParts.push("liveness_status = 'live'");
-  } else if (liveness === 'unverified') {
-    whereParts.push("liveness_status != 'live'");
+  if (status !== 'expired') {
+    if (liveness === 'live') {
+      whereParts.push("liveness_status = 'live'");
+    } else if (liveness === 'unverified') {
+      whereParts.push("liveness_status != 'live'");
+    }
   }
 
   if (q) {
@@ -256,7 +414,7 @@ app.get('/api/dashboard', (req: Request, res: Response) => {
 
   const dailyPickRows = db
     .prepare(
-      `SELECT * FROM jobs WHERE is_daily_pick = 1 AND status != 'dismissed'
+      `SELECT * FROM jobs WHERE is_daily_pick = 1 AND status != 'dismissed' AND ${NOT_EXPIRED_LIVENESS_SQL}
        ORDER BY jury_score DESC, score DESC LIMIT 5`
     )
     .all() as unknown as JobItem[];
@@ -279,6 +437,8 @@ app.get('/api/dashboard', (req: Request, res: Response) => {
     },
     profile,
     latestDeliberation,
+    jurySnapshot: getJuryDecisionSnapshot(),
+    juryHistory: getJuryDecisionHistory(),
     googleSearchUrl: googleCareersSearchUrl(profile),
   });
 });
@@ -324,16 +484,36 @@ app.get('/api/jobs/:id', (req: Request, res: Response) => {
   });
 });
 
+const ALLOWED_CLICK_EVENTS = new Set([
+  'click',
+  'inspect',
+  'open_link',
+  'view_debate',
+  'view_drafts',
+]);
+
 app.post('/api/jobs/:id/click', (req: Request, res: Response) => {
   const jobId = String(req.params.id);
-  const eventType = req.body?.eventType === 'view_debate' ? 'view_debate' : 'click';
+  const rawType = typeof req.body?.eventType === 'string' ? req.body.eventType : 'click';
+  const eventType = ALLOWED_CLICK_EVENTS.has(rawType) ? rawType : 'click';
   const jobRow = db.prepare('SELECT * FROM jobs WHERE id=?').get(jobId) as unknown as JobItem | undefined;
   if (!jobRow) {
     res.status(404).json({ error: 'Job not found' });
     return;
   }
   recordInteraction(db, 'workspace_session', jobId, eventType, jobRow);
-  res.json({ ok: true, job: enrichJob(jobRow) });
+  const cal = recalibrateScoresFromWeights(db, getProfileRow());
+  const updatedJob = db.prepare('SELECT * FROM jobs WHERE id=?').get(jobId) as unknown as JobItem;
+  const weights = db.prepare('SELECT * FROM learned_weights ORDER BY ABS(score_delta) DESC LIMIT 60').all() as unknown as LearnedWeight[];
+
+  res.json({
+    ok: true,
+    recalibrated: cal.updatedCount,
+    job: enrichJob(updatedJob),
+    weights,
+    stats: getStats(),
+    jurySnapshot: getJuryDecisionSnapshot(),
+  });
 });
 
 app.post('/api/jobs/:id/status', (req: Request, res: Response) => {
@@ -354,7 +534,7 @@ app.post('/api/jobs/:id/status', (req: Request, res: Response) => {
   }
 
   db.prepare('UPDATE jobs SET status=? WHERE id=?').run(status, jobId);
-  const updatedJob = db.prepare('SELECT * FROM jobs WHERE id=?').get(jobId) as unknown as JobItem;
+  let updatedJob = db.prepare('SELECT * FROM jobs WHERE id=?').get(jobId) as unknown as JobItem;
 
   if (status === 'shortlisted') {
     recordInteraction(db, 'workspace_session', jobId, 'shortlist', updatedJob);
@@ -368,18 +548,26 @@ app.post('/api/jobs/:id/status', (req: Request, res: Response) => {
     recordInteraction(db, 'workspace_session', jobId, 'dismiss', updatedJob, reason, detail);
   }
 
+  recalibrateScoresFromWeights(db, getProfileRow());
+  updatedJob = db.prepare('SELECT * FROM jobs WHERE id=?').get(jobId) as unknown as JobItem;
+  const weights = db.prepare('SELECT * FROM learned_weights ORDER BY ABS(score_delta) DESC LIMIT 60').all() as unknown as LearnedWeight[];
+
   const message =
     status === 'shortlisted'
-      ? 'Job shortlisted and tailored resume & cover letter drafts prepared.'
+      ? 'Job shortlisted, tailored drafts prepared & Jury trained.'
       : status === 'dismissed' && reason && REJECTION_REASON_LABELS[reason]
-        ? `Job dismissed; Jury trained on reason: ${REJECTION_REASON_LABELS[reason]}.`
-        : `Job marked as ${status}.`;
+        ? `Disliked & hidden; Jury trained on reason: ${REJECTION_REASON_LABELS[reason]}.`
+        : status === 'dismissed'
+          ? 'Job disliked & hidden; Jury re-trained and next top pick promoted.'
+          : `Job marked as ${status} & Jury updated.`;
 
   res.json({
     ok: true,
     message,
     job: enrichJob(updatedJob),
+    weights,
     stats: getStats(),
+    jurySnapshot: getJuryDecisionSnapshot(),
   });
 });
 
@@ -388,15 +576,36 @@ app.get('/api/jury', (_req: Request, res: Response) => {
     .prepare('SELECT * FROM deliberations ORDER BY created_at DESC LIMIT 1')
     .get() || null) as unknown as DeliberationSession | null;
 
-  const jobs = db
+  const activeJobs = db
     .prepare(
       `SELECT * FROM jobs WHERE status != 'dismissed'
        ORDER BY is_daily_pick DESC, jury_score DESC, score DESC
-       LIMIT 25`
+       LIMIT 24`
     )
     .all() as unknown as JobItem[];
 
-  const items = jobs.map((job) => {
+  const rejectedJobs = db
+    .prepare(
+      `SELECT * FROM jobs
+       WHERE status = 'dismissed'
+          OR jury_verdict LIKE 'REJECTED%'
+          OR jury_verdict LIKE 'CONSTRAINED%'
+          OR jury_verdict LIKE 'DEFERRED%'
+       ORDER BY CASE WHEN status = 'dismissed' THEN 0 ELSE 1 END, jury_score DESC, created_at DESC
+       LIMIT 16`
+    )
+    .all() as unknown as JobItem[];
+
+  const seenIds = new Set<string>();
+  const combinedJobs: JobItem[] = [];
+  for (const j of [...activeJobs, ...rejectedJobs]) {
+    if (!seenIds.has(j.id)) {
+      seenIds.add(j.id);
+      combinedJobs.push(j);
+    }
+  }
+
+  const items = combinedJobs.map((job) => {
     let args: AgentArgument[] = [];
     if (deliberation) {
       args = db
@@ -426,12 +635,40 @@ app.get('/api/jury', (_req: Request, res: Response) => {
   });
 });
 
+let lastSourceSyncMs = 0;
+
+app.post('/api/sources/sync', async (_req: Request, res: Response) => {
+  try {
+    const syncResult = await syncAllJobSources(db);
+    lastSourceSyncMs = Date.now();
+    const delib = runJuryDeliberation(db, getProfileRow());
+    res.json({
+      ok: true,
+      sync: syncResult,
+      deliberation: delib,
+      sources: getStats().sources,
+      message: `Synced ${syncResult.upsertedTotal} live roles across ${Object.keys(syncResult.bySource).length} job boards and re-convened Supreme Jury.`,
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Failed to sync job boards.',
+    });
+  }
+});
+
 app.post('/api/jury/convene', (_req: Request, res: Response) => {
   const profile = getProfileRow();
   const result = runJuryDeliberation(db, profile);
+  if (Date.now() - lastSourceSyncMs > 2 * 60 * 60 * 1000) {
+    lastSourceSyncMs = Date.now();
+    syncAllJobSources(db)
+      .then(() => runJuryDeliberation(db, getProfileRow()))
+      .catch(() => {});
+  }
   res.json({
     ok: true,
     ...result,
+    jurySnapshot: getJuryDecisionSnapshot(),
     message: `Supreme Jury deliberated ${result.reviewedCount} roles and crowned ${result.crownedCount} daily picks.`,
   });
 });
@@ -448,7 +685,11 @@ app.get('/api/jobs/:id/application', (req: Request, res: Response) => {
     .prepare('SELECT * FROM applications WHERE job_id=? ORDER BY id DESC LIMIT 1')
     .get(jobId) || null) as unknown as ApplicationDraft | null;
 
-  if (!application || !application.tailored_cv || !application.cover_letter) {
+  const hasPdfGarbage = (txt: string | null | undefined) =>
+    !txt ||
+    /\/(?:FlateDecode|Type\s+\/Page|FontDescriptor)|endobj|endstream|\uFFFD/.test(txt);
+
+  if (!application || !application.tailored_cv || !application.cover_letter || hasPdfGarbage(application.tailored_cv)) {
     application = storeApplicationMaterials(job, getProfileRow());
   }
 
@@ -556,7 +797,7 @@ app.post('/api/profile', (req: Request, res: Response) => {
   const experience_level = String(req.body?.experience_level ?? current.experience_level).trim();
   const excluded_skills = String(req.body?.excluded_skills ?? current.excluded_skills).trim();
   const excluded_job_terms = String(req.body?.excluded_job_terms ?? current.excluded_job_terms).trim();
-  const cv_text = String(req.body?.cv_text ?? current.cv_text);
+  const cv_text = sanitizeCvText(String(req.body?.cv_text ?? current.cv_text));
 
   let cvAnalysis = current.cv_analysis;
   const cvChanged = cv_text.trim() !== (current.cv_text || '').trim();
@@ -597,9 +838,81 @@ app.post('/api/profile', (req: Request, res: Response) => {
     ok: true,
     profile: updated,
     deliberation: delib,
+    jurySnapshot: getJuryDecisionSnapshot(),
     message: `Profile saved and Supreme Jury re-convened (${delib.crownedCount} daily picks updated).`,
   });
 });
+
+function decodePdfStreamText(source: string): string[] {
+  const chunks: string[] = [];
+  const literalRx = /\(([^()\\]*(?:\\.[^()\\]*)*)\)\s*(?:Tj|'|")/g;
+  let m: RegExpExecArray | null;
+  while ((m = literalRx.exec(source)) !== null) {
+    const cleaned = m[1]
+      .replace(/\\n/g, '\n')
+      .replace(/\\r/g, '\n')
+      .replace(/\\t/g, ' ')
+      .replace(/\\([()\\])/g, '$1')
+      .replace(/\\\d{3}/g, ' ')
+      .trim();
+    if (cleaned) chunks.push(cleaned);
+  }
+
+  // Also check TJ arrays like [(Hello ) -10 (World)] TJ
+  const arrayRx = /\[([^\]]+)\]\s*TJ/g;
+  while ((m = arrayRx.exec(source)) !== null) {
+    const innerMatches = m[1].match(/\(([^()\\]*(?:\\.[^()\\]*)*)\)/g);
+    if (innerMatches) {
+      const joined = innerMatches
+        .map((part) =>
+          part
+            .slice(1, -1)
+            .replace(/\\n/g, '\n')
+            .replace(/\\r/g, '\n')
+            .replace(/\\t/g, ' ')
+            .replace(/\\([()\\])/g, '$1')
+        )
+        .join('')
+        .trim();
+      if (joined) chunks.push(joined);
+    }
+  }
+  return chunks;
+}
+
+async function extractPdfText(buffer: Buffer): Promise<string> {
+  try {
+    const pdf = await getDocumentProxy(new Uint8Array(buffer));
+    const { text } = await extractText(pdf, { mergePages: true });
+    const cleaned = sanitizeCvText(typeof text === 'string' ? text : '');
+    if (cleaned.length >= 20) {
+      return cleaned;
+    }
+  } catch {
+    // Fallback to FlateDecode plain ASCII stream scan below
+  }
+
+  const raw = buffer.toString('latin1');
+  const pieces: string[] = [];
+  const streamRx = /stream\r?\n([\s\S]*?)\r?\n?endstream/g;
+  let match: RegExpExecArray | null;
+  while ((match = streamRx.exec(raw)) !== null) {
+    const streamBytes = Buffer.from(match[1], 'latin1');
+    let decoded = match[1];
+    try {
+      decoded = zlib.inflateSync(streamBytes).toString('latin1');
+    } catch {
+      try {
+        decoded = zlib.inflateRawSync(streamBytes).toString('latin1');
+      } catch {
+        // Keep raw uncompressed stream if not zlib-deflated
+      }
+    }
+    pieces.push(...decodePdfStreamText(decoded));
+  }
+
+  return sanitizeCvText(pieces.join('\n'));
+}
 
 app.post('/api/profile/upload-cv', upload.single('cv_file'), async (req: Request, res: Response) => {
   const file = req.file;
@@ -610,53 +923,213 @@ app.post('/api/profile/upload-cv', upload.single('cv_file'), async (req: Request
 
   const filename = file.originalname.replace(/[^a-zA-Z0-9_.-]/g, '_');
   const ext = path.extname(filename).toLowerCase();
+  const jobId = typeof req.body?.jobId === 'string' ? req.body.jobId.trim() : '';
   let extractedText = '';
 
   try {
-    if (ext === '.txt' || ext === '.md') {
-      extractedText = file.buffer.toString('utf8');
+    if (ext === '.txt' || ext === '.md' || ext === '.csv') {
+      extractedText = sanitizeCvText(file.buffer.toString('utf8'));
     } else if (ext === '.docx') {
       const zip = await JSZip.loadAsync(file.buffer);
       const docXml = await zip.file('word/document.xml')?.async('string');
       if (docXml) {
-        extractedText = docXml
+        const xmlText = docXml
           .replace(/<\/w:p>/g, '\n')
+          .replace(/<\/w:tr>/g, '\n')
+          .replace(/<w:tab\/>/g, ' ')
           .replace(/<[^>]+>/g, ' ')
-          .replace(/[ \t]+/g, ' ')
-          .replace(/\n\s+/g, '\n')
-          .trim();
+          .replace(/&amp;/g, '&')
+          .replace(/&lt;/g, '<')
+          .replace(/&gt;/g, '>')
+          .replace(/&quot;/g, '"')
+          .replace(/&apos;/g, "'");
+        extractedText = sanitizeCvText(xmlText);
       }
     } else if (ext === '.pdf') {
-      // Lightweight text extraction for uncompressed PDF text streams
-      const raw = file.buffer.toString('latin1');
-      const matches = raw.match(/\(([^()]{3,200})\)/g) || [];
-      extractedText = matches
-        .map((m) => m.slice(1, -1).replace(/\\([()\\])/g, '$1'))
-        .filter((s) => /[a-zA-Z]{2,}/.test(s))
-        .join(' ')
-        .trim();
+      extractedText = await extractPdfText(file.buffer);
+    } else {
+      extractedText = sanitizeCvText(file.buffer.toString('utf8'));
     }
   } catch {
     extractedText = '';
   }
 
   const current = getProfileRow();
-  const cvTextToUse = extractedText || current.cv_text;
+  const cvTextToUse = extractedText || sanitizeCvText(current.cv_text);
   const cvAnalysis = analyzeCv(cvTextToUse);
+  const parsedCv = parseCvSections(cvTextToUse);
   const nowIso = new Date().toISOString();
 
+  // Merge newly extracted CV skills with current skills if detected
+  let updatedSkills = current.skills;
+  if (cvAnalysis.skills.length > 0) {
+    const existingSkills = current.skills.split(',').map((s) => s.trim()).filter(Boolean);
+    const merged = Array.from(
+      new Map([...cvAnalysis.skills, ...existingSkills].map((s) => [s.toLowerCase(), s])).values()
+    );
+    updatedSkills = merged.join(', ');
+  }
+
+  let updatedRoles = current.target_roles;
+  if (cvAnalysis.roles.length > 0) {
+    const existingRoles = current.target_roles.split(',').map((r) => r.trim()).filter(Boolean);
+    const mergedRoles = Array.from(
+      new Map([...cvAnalysis.roles, ...existingRoles].map((r) => [r.toLowerCase(), r])).values()
+    );
+    updatedRoles = mergedRoles.join(', ');
+  }
+
+  const updatedName = parsedCv.detectedName || current.name;
+  const updatedDegree = parsedCv.detectedDegree || current.degree;
+  const updatedResidence = parsedCv.detectedLocation || current.residence;
+
   db.prepare(
-    `UPDATE profile SET cv_filename=?, cv_uploaded_at=?, cv_text=?, cv_analysis=?, updated_at=? WHERE id=1`
-  ).run(filename, nowIso, cvTextToUse, JSON.stringify(cvAnalysis), nowIso);
+    `UPDATE profile
+     SET name=?, residence=?, degree=?, skills=?, target_roles=?,
+         cv_filename=?, cv_uploaded_at=?, cv_text=?, cv_analysis=?, updated_at=?
+     WHERE id=1`
+  ).run(
+    updatedName,
+    updatedResidence,
+    updatedDegree,
+    updatedSkills,
+    updatedRoles,
+    filename,
+    nowIso,
+    cvTextToUse,
+    JSON.stringify(cvAnalysis),
+    nowIso
+  );
 
   const updated = getProfileRow();
+  let application: ApplicationDraft | null = null;
+  if (jobId) {
+    const targetJob = db.prepare('SELECT * FROM jobs WHERE id=?').get(jobId) as unknown as JobItem | undefined;
+    if (targetJob) {
+      application = storeApplicationMaterials(targetJob, updated);
+    }
+  }
+
   res.json({
     ok: true,
     profile: updated,
+    application,
     extractedLength: extractedText.length,
+    detectedSkills: cvAnalysis.skills,
     message: extractedText
-      ? `Uploaded '${filename}' and extracted ${extractedText.length} characters for CV matching.`
-      : `Uploaded '${filename}'. Paste text in the CV editor if PDF streams are compressed.`,
+      ? `Uploaded '${filename}': extracted ${cvAnalysis.skills.length} skills/keywords (${extractedText.length} clean chars) into your profile${application ? ' and rebuilt this resume' : ''}.`
+      : `Uploaded '${filename}'. If image-only/scanned PDF, paste plain text in Profile CV editor to extract skills.`,
+  });
+});
+
+app.post('/api/workspace/hydrate', (req: Request, res: Response) => {
+  const cloudProfile = req.body?.profile as Partial<CandidateProfile> | undefined;
+  const cloudActions = Array.isArray(req.body?.jobActions)
+    ? (req.body.jobActions as Array<{ jobId: string; status: string }>)
+    : [];
+  const cloudApps = Array.isArray(req.body?.applications)
+    ? (req.body.applications as Array<{ jobId: string; tailored_cv: string; cover_letter: string }>)
+    : [];
+  const cloudWeights = Array.isArray(req.body?.learnedWeights)
+    ? (req.body.learnedWeights as Array<{
+        feature_type: string;
+        feature_value: string;
+        score_delta: number;
+        positive_hits: number;
+        negative_hits: number;
+      }>)
+    : [];
+
+  const nowIso = new Date().toISOString();
+
+  db.exec('BEGIN');
+  try {
+    if (cloudProfile) {
+      const current = getProfileRow();
+      const cleanedCv = cloudProfile.cv_text ? sanitizeCvText(cloudProfile.cv_text) : current.cv_text;
+      const cvAnalysis = cleanedCv ? analyzeCv(cleanedCv) : current.cv_analysis;
+      db.prepare(
+        `UPDATE profile SET
+           name=?, citizenship=?, residence=?, degree=?, skills=?, target_roles=?,
+           cv_text=?, cv_filename=?, cv_analysis=?, experience_level=?,
+           excluded_skills=?, excluded_job_terms=?, updated_at=?
+         WHERE id=1`
+      ).run(
+        cloudProfile.name ?? current.name,
+        cloudProfile.citizenship ?? current.citizenship,
+        cloudProfile.residence ?? current.residence,
+        cloudProfile.degree ?? current.degree,
+        cloudProfile.skills ?? current.skills,
+        cloudProfile.target_roles ?? current.target_roles,
+        cleanedCv,
+        cloudProfile.cv_filename ?? current.cv_filename ?? null,
+        cvAnalysis ? JSON.stringify(cvAnalysis) : null,
+        cloudProfile.experience_level ?? current.experience_level,
+        cloudProfile.excluded_skills ?? current.excluded_skills,
+        cloudProfile.excluded_job_terms ?? current.excluded_job_terms,
+        nowIso
+      );
+    }
+
+    const updateJobStatus = db.prepare('UPDATE jobs SET status=? WHERE id=?');
+    for (const act of cloudActions) {
+      if (act?.jobId && ['new', 'shortlisted', 'applied', 'dismissed'].includes(act.status)) {
+        updateJobStatus.run(act.status, act.jobId);
+      }
+    }
+
+    const findApp = db.prepare('SELECT id FROM applications WHERE job_id=? ORDER BY id DESC LIMIT 1');
+    const updateApp = db.prepare('UPDATE applications SET tailored_cv=?, cover_letter=? WHERE id=?');
+    const insertApp = db.prepare(
+      'INSERT INTO applications (job_id, status, tailored_cv, cover_letter, created_at) VALUES (?, ?, ?, ?, ?)'
+    );
+    for (const appDoc of cloudApps) {
+      if (!appDoc?.jobId) continue;
+      const existing = findApp.get(appDoc.jobId) as { id: number } | undefined;
+      if (existing) {
+        updateApp.run(appDoc.tailored_cv || '', appDoc.cover_letter || '', existing.id);
+      } else {
+        insertApp.run(appDoc.jobId, 'shortlisted', appDoc.tailored_cv || '', appDoc.cover_letter || '', nowIso);
+      }
+    }
+
+    const upsertWeight = db.prepare(`
+      INSERT INTO learned_weights (feature_type, feature_value, score_delta, positive_hits, negative_hits, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(feature_type, feature_value) DO UPDATE SET
+        score_delta = excluded.score_delta,
+        positive_hits = excluded.positive_hits,
+        negative_hits = excluded.negative_hits,
+        updated_at = excluded.updated_at
+    `);
+    for (const w of cloudWeights) {
+      if (w?.feature_type && w?.feature_value) {
+        upsertWeight.run(
+          w.feature_type,
+          w.feature_value,
+          Number(w.score_delta || 0),
+          Number(w.positive_hits || 0),
+          Number(w.negative_hits || 0),
+          nowIso
+        );
+      }
+    }
+
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+
+  const updatedProfile = getProfileRow();
+  const delib = runJuryDeliberation(db, updatedProfile);
+  res.json({
+    ok: true,
+    profile: updatedProfile,
+    deliberation: delib,
+    stats: getStats(),
+    jurySnapshot: getJuryDecisionSnapshot(),
+    juryHistory: getJuryDecisionHistory(),
   });
 });
 
@@ -694,7 +1167,12 @@ app.get('/api/settings', (_req: Request, res: Response) => {
     training: {
       stage,
       total_events: totalEvents,
-      clicks: counts.click || 0,
+      clicks:
+        (counts.click || 0) +
+        (counts.inspect || 0) +
+        (counts.open_link || 0) +
+        (counts.view_debate || 0) +
+        (counts.view_drafts || 0),
       shortlists: counts.shortlist || 0,
       applies: counts.apply || 0,
       dismisses: counts.dismiss || 0,
@@ -722,12 +1200,25 @@ function ensureDaily24hDeliberation() {
     .get() as { created_at?: string } | undefined;
   const lastMs = latest?.created_at ? Date.parse(latest.created_at) : 0;
   if (!lastMs || Number.isNaN(lastMs) || Date.now() - lastMs >= TWENTY_FOUR_HOURS_MS) {
-    runJuryDeliberation(db, getProfileRow());
+    lastSourceSyncMs = Date.now();
+    syncAllJobSources(db)
+      .catch(() => {})
+      .finally(() => {
+        runJuryDeliberation(db, getProfileRow());
+      });
   }
 }
 
 async function startServer() {
   ensureDaily24hDeliberation();
+  // Kick off initial background source sync if only a few boards are present
+  const sourceCount = Number((db.prepare('SELECT COUNT(DISTINCT source) as c FROM jobs').get() as { c: number }).c);
+  if (sourceCount < 6) {
+    lastSourceSyncMs = Date.now();
+    syncAllJobSources(db)
+      .then(() => runJuryDeliberation(db, getProfileRow()))
+      .catch(() => {});
+  }
   setInterval(ensureDaily24hDeliberation, 15 * 60 * 1000);
 
   if (process.env.NODE_ENV === 'production') {

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { RefreshCw, RotateCcw, Scale } from 'lucide-react';
 import type { SettingsResponse } from '../types.ts';
+import { JuryMatchTrendChart } from './JuryMatchTrendChart.tsx';
 
 interface SettingsViewProps {
   onConveneJury: () => Promise<void>;
@@ -20,6 +21,7 @@ export function SettingsView({
   const [error, setError] = useState<string | null>(null);
   const [confirmResetOpen, setConfirmResetOpen] = useState(false);
   const [resetting, setResetting] = useState(false);
+  const [syncingSources, setSyncingSources] = useState(false);
 
   const loadSettings = () => {
     setLoading(true);
@@ -54,6 +56,22 @@ export function SettingsView({
     }
   };
 
+  const handleSyncSources = async () => {
+    setSyncingSources(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/sources/sync', { method: 'POST' });
+      const payload = await res.json();
+      if (!res.ok) throw new Error(payload.error || 'Sync failed.');
+      onNotify(payload.message || 'Synced live job boards.');
+      loadSettings();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Sync error.');
+    } finally {
+      setSyncingSources(false);
+    }
+  };
+
   return (
     <div className="space-y-8 max-w-5xl">
       <div className="pb-6 border-b border-slate-200 flex flex-col sm:flex-row sm:items-end justify-between gap-4">
@@ -67,15 +85,26 @@ export function SettingsView({
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={onConveneJury}
-          disabled={isConvening}
-          className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-60 rounded-lg transition-colors whitespace-nowrap self-start sm:self-auto"
-        >
-          <Scale className="w-4 h-4" />
-          <span>{isConvening ? 'Deliberating…' : 'Convene Supreme Jury'}</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+          <button
+            type="button"
+            onClick={handleSyncSources}
+            disabled={syncingSources || isConvening}
+            className="inline-flex items-center gap-2 px-3.5 py-2 text-sm font-semibold text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 disabled:opacity-60 rounded-lg transition-colors whitespace-nowrap"
+          >
+            <RefreshCw className={`w-4 h-4 ${syncingSources ? 'animate-spin' : ''}`} />
+            <span>{syncingSources ? 'Syncing Boards…' : 'Sync 10 Job Boards'}</span>
+          </button>
+          <button
+            type="button"
+            onClick={onConveneJury}
+            disabled={isConvening}
+            className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-60 rounded-lg transition-colors whitespace-nowrap"
+          >
+            <Scale className="w-4 h-4" />
+            <span>{isConvening ? 'Deliberating…' : 'Convene Supreme Jury'}</span>
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -83,6 +112,9 @@ export function SettingsView({
           {error}
         </div>
       )}
+
+      {/* Firebase-Synced Recharts Job Match Trend Visualization */}
+      <JuryMatchTrendChart />
 
       {/* Behavioral Learning Summary */}
       <section className="bg-white border border-slate-200 rounded-xl p-6 space-y-6">
@@ -190,8 +222,10 @@ export function SettingsView({
           </h2>
           <dl className="space-y-2.5 text-sm">
             <div>
-              <dt className="text-xs font-medium text-slate-500">Level 3 Scouts</dt>
-              <dd className="text-slate-800 mt-0.5">Arbeitnow Scout, Remotive Scout, Direct Employer ATS</dd>
+              <dt className="text-xs font-medium text-slate-500">Level 3 Scouts ({data?.sources.length || 10} Job Boards)</dt>
+              <dd className="text-slate-800 mt-0.5">
+                Google Careers, Greenhouse ATS, Ashby ATS, Himalayas, Jobicy, RemoteOK, WorkingNomads, Arbeitnow, Remotive, Direct Employer
+              </dd>
             </div>
             <div>
               <dt className="text-xs font-medium text-slate-500">Level 2 Sub-Agents</dt>

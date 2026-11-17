@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
-import { Save, Upload } from 'lucide-react';
+import { Cloud, Save, Upload } from 'lucide-react';
 import type { CandidateProfile } from '../types.ts';
+import { useAuth } from '../contexts/AuthContext.tsx';
+import { syncProfileToCloud } from '../firebase.ts';
 
 interface ProfileViewProps {
   onNotify: (message: string) => void;
@@ -8,6 +10,7 @@ interface ProfileViewProps {
 }
 
 export function ProfileView({ onNotify, onProfileSaved }: ProfileViewProps) {
+  const { user, signInWithGoogle, recordJurySnapshot } = useAuth();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -79,14 +82,24 @@ export function ProfileView({ onNotify, onProfileSaved }: ProfileViewProps) {
           excluded_skills: excludedSkills,
           excluded_job_terms: excludedJobTerms,
           cv_text: cvText,
-          preserveRoles: true,
-          preserveSkills: true,
+          preserveRoles: cvText.trim() === (profile?.cv_text || '').trim(),
+          preserveSkills: cvText.trim() === (profile?.cv_text || '').trim(),
         }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Unable to save profile.');
       hydrate(data.profile);
-      onNotify(data.message || 'Profile saved and Jury updated.');
+      if (user && data.profile) {
+        void syncProfileToCloud(user.uid, data.profile);
+      }
+      if (data.jurySnapshot) {
+        void recordJurySnapshot(data.jurySnapshot);
+      }
+      onNotify(
+        user
+          ? `${data.message || 'Profile saved and Jury updated.'} Synced to cloud account.`
+          : data.message || 'Profile saved and Jury updated.'
+      );
       onProfileSaved();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Save error.');
@@ -110,7 +123,11 @@ export function ProfileView({ onNotify, onProfileSaved }: ProfileViewProps) {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Upload failed.');
       hydrate(data.profile);
+      if (user && data.profile) {
+        void syncProfileToCloud(user.uid, data.profile);
+      }
       onNotify(data.message || 'CV uploaded and analyzed.');
+      onProfileSaved();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Upload error.');
     } finally {
@@ -130,14 +147,31 @@ export function ProfileView({ onNotify, onProfileSaved }: ProfileViewProps) {
 
   return (
     <div className="space-y-8 max-w-5xl">
-      <div className="pb-6 border-b border-slate-200">
-        <p className="text-xs font-medium text-slate-500">Candidate Criteria &amp; CV Matching</p>
-        <h1 className="font-display text-2xl sm:text-3xl font-bold text-slate-900 mt-1">
-          Candidate Profile Matrix
-        </h1>
-        <p className="text-sm text-slate-600 mt-1">
-          Configure target tracks, exclusions, and CV content. Saving re-convenes the Supreme Jury with your updated constraints.
-        </p>
+      <div className="pb-6 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <p className="text-xs font-medium text-slate-500">Candidate Criteria &amp; CV Matching</p>
+          <h1 className="font-display text-2xl sm:text-3xl font-bold text-slate-900 mt-1">
+            Candidate Profile Matrix
+          </h1>
+          <p className="text-sm text-slate-600 mt-1">
+            Configure target tracks, exclusions, and CV content. Saving re-convenes the Supreme Jury with your updated constraints.
+          </p>
+        </div>
+        {!user ? (
+          <button
+            type="button"
+            onClick={() => void signInWithGoogle()}
+            className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-semibold text-blue-700 bg-blue-50 border border-blue-200 hover:bg-blue-100 rounded-lg transition-colors whitespace-nowrap self-start sm:self-auto"
+          >
+            <Cloud className="w-3.5 h-3.5" />
+            <span>Sign in to persist CV permanently</span>
+          </button>
+        ) : (
+          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg whitespace-nowrap self-start sm:self-auto">
+            <Cloud className="w-3.5 h-3.5" />
+            <span>Auto-saved to {user.email}</span>
+          </span>
+        )}
       </div>
 
       {error && (

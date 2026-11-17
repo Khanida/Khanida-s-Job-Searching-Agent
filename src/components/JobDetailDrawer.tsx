@@ -17,7 +17,7 @@ interface JobDetailDrawerProps {
   onStatusChange: (job: JobItem, status: JobStatus) => Promise<void>;
   onOpenReject: (job: JobItem) => void;
   onOpenApplication: (jobId: string) => void;
-  onTrackClick: (jobId: string) => void;
+  onTrackClick: (jobId: string, eventType?: 'click' | 'inspect' | 'open_link' | 'view_debate' | 'view_drafts') => void;
 }
 
 function formatArgType(type: string): string {
@@ -179,12 +179,27 @@ export function JobDetailDrawer({
               {(job.status === 'shortlisted' || job.status === 'applied') && (
                 <button
                   type="button"
-                  onClick={() => onOpenApplication(job.id)}
+                  onClick={() => {
+                    onTrackClick(job.id, 'view_drafts');
+                    onOpenApplication(job.id);
+                  }}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors whitespace-nowrap"
                 >
                   <FileText className="w-3.5 h-3.5" />
                   Resume &amp; Cover Letter
                 </button>
+              )}
+              {job.url && (
+                <a
+                  href={job.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={() => onTrackClick(job.id, 'open_link')}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-blue-700 bg-blue-50 border border-blue-200 hover:bg-blue-100 rounded-lg transition-colors whitespace-nowrap"
+                >
+                  <span>Open Job</span>
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </a>
               )}
               {job.status !== 'dismissed' ? (
                 <button
@@ -225,6 +240,43 @@ export function JobDetailDrawer({
             </div>
           ) : job ? (
             <>
+              {/* Direct Posting Link */}
+              <section className="px-4 py-3 rounded-lg bg-white border border-slate-200 flex items-center justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    Job Link
+                  </div>
+                  {job.url ? (
+                    <a
+                      href={job.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={() => onTrackClick(job.id, 'open_link')}
+                      className="text-xs sm:text-sm font-medium text-blue-600 hover:text-blue-700 hover:underline break-all block mt-0.5"
+                    >
+                      {job.url}
+                    </a>
+                  ) : (
+                    <span className="text-xs text-slate-500 block mt-0.5">
+                      No posting URL recorded
+                    </span>
+                  )}
+                </div>
+                {job.url && (
+                  <a
+                    href={job.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={() => onTrackClick(job.id, 'open_link')}
+                    aria-label="Open external job posting"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors shrink-0 whitespace-nowrap"
+                  >
+                    <span>Visit</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                )}
+              </section>
+
               {/* Supreme Jury Verdict */}
               <section className="p-4 rounded-lg bg-slate-50 border border-slate-200 space-y-2">
                 <div className="flex items-center justify-between gap-3">
@@ -340,7 +392,7 @@ export function JobDetailDrawer({
                       href={job.url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      onClick={() => onTrackClick(job.id)}
+                      onClick={() => onTrackClick(job.id, 'open_link')}
                       className="inline-flex items-center gap-1.5 text-xs font-semibold text-blue-600 hover:text-blue-700 hover:underline"
                     >
                       <span>Open original posting</span>

@@ -1,0 +1,344 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Candidate workspace profile, uploaded CV text, and targeting/exclusion preferences persisted per authenticated user.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID owning this workspace profile.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Candidate full name.",
+          "maxLength": 120
+        },
+        "citizenship": {
+          "type": "string",
+          "description": "Candidate citizenship/work authorization note.",
+          "maxLength": 120
+        },
+        "residence": {
+          "type": "string",
+          "description": "Current city and country of residence.",
+          "maxLength": 120
+        },
+        "degree": {
+          "type": "string",
+          "description": "Academic degree and university details.",
+          "maxLength": 200
+        },
+        "skills": {
+          "type": "string",
+          "description": "Comma-separated technical and core skills.",
+          "maxLength": 3000
+        },
+        "target_roles": {
+          "type": "string",
+          "description": "Comma-separated target role titles.",
+          "maxLength": 1500
+        },
+        "cv_text": {
+          "type": "string",
+          "description": "Sanitized plain-text content extracted from uploaded CV.",
+          "maxLength": 120000
+        },
+        "cv_filename": {
+          "type": "string",
+          "description": "Original filename of the latest uploaded CV.",
+          "maxLength": 260
+        },
+        "experience_level": {
+          "type": "string",
+          "description": "Target experience tier.",
+          "enum": ["entry-level", "mid-level", "all"]
+        },
+        "excluded_skills": {
+          "type": "string",
+          "description": "Comma-separated skills to exclude from Jury picks.",
+          "maxLength": 600
+        },
+        "excluded_job_terms": {
+          "type": "string",
+          "description": "Comma-separated role title terms to exclude.",
+          "maxLength": 600
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Immutable creation server timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last modification server timestamp."
+        }
+      },
+      "required": [
+        "ownerId",
+        "name",
+        "citizenship",
+        "residence",
+        "degree",
+        "skills",
+        "target_roles",
+        "cv_text",
+        "cv_filename",
+        "experience_level",
+        "excluded_skills",
+        "excluded_job_terms",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserJobAction": {
+      "title": "UserJobAction",
+      "description": "Persisted user decision (shortlisted, applied, dismissed, or active), click count, and rejection reason per job.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "jobId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["new", "shortlisted", "applied", "dismissed"]
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "detail": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "clicks": {
+          "type": "number"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "jobId",
+        "status",
+        "reason",
+        "detail",
+        "clicks",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserApplicationDoc": {
+      "title": "UserApplicationDoc",
+      "description": "Persisted tailored resume, cover letter, and selected template style per user and job.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "jobId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "tailored_cv": {
+          "type": "string",
+          "maxLength": 120000
+        },
+        "cover_letter": {
+          "type": "string",
+          "maxLength": 40000
+        },
+        "template": {
+          "type": "string",
+          "enum": ["executive", "modern", "ats"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "jobId",
+        "tailored_cv",
+        "cover_letter",
+        "template",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserLearnedPreference": {
+      "title": "UserLearnedPreference",
+      "description": "Trained Jury behavioral weight delta for a specific feature type and value.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "feature_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "feature_value": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "score_delta": {
+          "type": "number"
+        },
+        "positive_hits": {
+          "type": "number"
+        },
+        "negative_hits": {
+          "type": "number"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "feature_type",
+        "feature_value",
+        "score_delta",
+        "positive_hits",
+        "negative_hits",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserJuryDecision": {
+      "title": "UserJuryDecision",
+      "description": "Time-series snapshot of Jury deliberation outcomes, matched job counts, shortlist/dislike tallies, and average match scores per user.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "sessionDate": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 48
+        },
+        "reviewedCount": {
+          "type": "number"
+        },
+        "matchedCount": {
+          "type": "number"
+        },
+        "dailyPicksCount": {
+          "type": "number"
+        },
+        "shortlistedCount": {
+          "type": "number"
+        },
+        "dismissedCount": {
+          "type": "number"
+        },
+        "avgMatchScore": {
+          "type": "number"
+        },
+        "topMatchScore": {
+          "type": "number"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "sessionId",
+        "sessionDate",
+        "label",
+        "reviewedCount",
+        "matchedCount",
+        "dailyPicksCount",
+        "shortlistedCount",
+        "dismissedCount",
+        "avgMatchScore",
+        "topMatchScore",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private candidate profile, uploaded CV text, and Jury targeting configuration."
+    },
+    "/users/{userId}/jobActions/{jobId}": {
+      "schema": { "$ref": "#/entities/UserJobAction" },
+      "description": "Private per-job pipeline status, clicks, and dislike/rejection training records."
+    },
+    "/users/{userId}/applications/{jobId}": {
+      "schema": { "$ref": "#/entities/UserApplicationDoc" },
+      "description": "Private tailored resume and cover letter drafts per job."
+    },
+    "/users/{userId}/learnedWeights/{weightId}": {
+      "schema": { "$ref": "#/entities/UserLearnedPreference" },
+      "description": "Private behavioral reinforcement weights trained from every click, shortlist, apply, and dislike."
+    },
+    "/users/{userId}/juryDecisions/{decisionId}": {
+      "schema": { "$ref": "#/entities/UserJuryDecision" },
+      "description": "Chronological Jury decision snapshots tracking job matches and score trends over time."
+    }
+  }
+}

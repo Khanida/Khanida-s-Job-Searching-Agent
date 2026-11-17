@@ -155,8 +155,22 @@ export function JuryRoomView({
                       }`}
                     >
                       <div className="flex items-center justify-between gap-2 text-xs text-slate-500 mb-1">
-                        <span className="font-medium truncate">
-                          {job.is_daily_pick === 1 ? 'Daily Selection' : job.source}
+                        <span
+                          className={`font-medium truncate ${
+                            job.status === 'dismissed' || /^(REJECTED|CONSTRAINED|DEFERRED)/i.test(job.jury_verdict || '')
+                              ? 'text-red-600 font-semibold'
+                              : job.is_daily_pick === 1
+                                ? 'text-emerald-700 font-semibold'
+                                : ''
+                          }`}
+                        >
+                          {job.status === 'dismissed'
+                            ? `Rejected · ${job.source}`
+                            : /^(REJECTED|CONSTRAINED|DEFERRED)/i.test(job.jury_verdict || '')
+                              ? `Jury Rejected · ${job.source}`
+                              : job.is_daily_pick === 1
+                                ? `Top 5 Pick · ${job.source}`
+                                : job.source}
                         </span>
                         <span className="font-mono font-semibold text-slate-900 tabular-nums shrink-0">
                           {job.jury_score || job.score}/100

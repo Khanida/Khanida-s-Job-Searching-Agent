@@ -9,9 +9,20 @@ import { SettingsView } from './components/SettingsView.tsx';
 import { JobDetailDrawer } from './components/JobDetailDrawer.tsx';
 import { RejectModal } from './components/RejectModal.tsx';
 import { ApplicationModal } from './components/ApplicationModal.tsx';
+import { AuthProvider, useAuth } from './contexts/AuthContext.tsx';
+import { syncJobActionToCloud, syncLearnedWeightsToCloud } from './firebase.ts';
 import type { DashboardResponse, JobItem, JobStatus } from './types.ts';
 
-export default function App() {
+type ClickEventType = 'click' | 'inspect' | 'open_link' | 'view_debate' | 'view_drafts';
+
+function AppWorkspace({
+  refreshSignal,
+  triggerRefresh,
+}: {
+  refreshSignal: number;
+  triggerRefresh: () => void;
+}) {
+  const { user, cloudError, recordJurySnapshot } = useAuth();
   const [activeTab, setActiveTab] = useState<NavTab>('overview');
 
   // Overview state
@@ -31,7 +42,6 @@ export default function App() {
 
   // Global actions & feedback
   const [isConvening, setIsConvening] = useState(false);
-  const [refreshSignal, setRefreshSignal] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const lastCycleAtRef = useRef<number>(Date.now());
@@ -56,48 +66,73 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [searchInput]);
 
-  const fetchDashboard = useCallback(async () => {
-    setDashboardLoading(true);
-    setErrorBanner(null);
-    try {
-      const params = new URLSearchParams({
-        status: statusFilter,
-        source: sourceFilter,
-        liveness: livenessFilter,
-        q: debouncedQuery,
-        page: String(page),
-        limit: '20',
-      });
-      const res = await fetch(`/api/dashboard?${params.toString()}`);
-      if (!res.ok) throw new Error('Unable to load opportunities dashboard.');
-      const payload = (await res.json()) as DashboardResponse;
-      setDashboard(payload);
-    } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : 'Dashboard request failed.');
-    } finally {
-      setDashboardLoading(false);
-    }
-  }, [statusFilter, sourceFilter, livenessFilter, debouncedQuery, page]);
+  const fetchDashboard = useCallback(
+    async (quiet = false) => {
+      if (!quiet) {
+        setDashboardLoading(true);
+      }
+      setErrorBanner(null);
+      try {
+        const params = new URLSearchParams({
+          status: statusFilter,
+          source: sourceFilter,
+          liveness: livenessFilter,
+          q: debouncedQuery,
+          page: String(page),
+          limit: '20',
+        });
+        const res = await fetch(`/api/dashboard?${params.toString()}`);
+        if (!res.ok) throw new Error('Unable to load opportunities dashboard.');
+        const payload = (await res.json()) as DashboardResponse;
+        setDashboard(payload);
+      } catch (err) {
+        setErrorBanner(err instanceof Error ? err.message : 'Dashboard request failed.');
+      } finally {
+        if (!quiet) {
+          setDashboardLoading(false);
+        }
+      }
+    },
+    [statusFilter, sourceFilter, livenessFilter, debouncedQuery, page]
+  );
 
   useEffect(() => {
-    fetchDashboard();
+    void fetchDashboard(false);
   }, [fetchDashboard, refreshSignal]);
 
-  const handleTrackClick = useCallback((jobId: string) => {
-    fetch(`/api/jobs/${encodeURIComponent(jobId)}/click`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ eventType: 'click' }),
-    }).catch(() => {});
-  }, []);
+  const handleTrackClick = useCallback(
+    (jobId: string, eventType: ClickEventType = 'click') => {
+      fetch(`/api/jobs/${encodeURIComponent(jobId)}/click`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventType }),
+      })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (!data) return;
+          void fetchDashboard(true);
+          if (user && Array.isArray(data.weights)) {
+            void syncLearnedWeightsToCloud(user.uid, data.weights);
+          }
+          if (data.jurySnapshot) {
+            void recordJurySnapshot(data.jurySnapshot);
+          }
+        })
+        .catch(() => {});
+    },
+    [fetchDashboard, recordJurySnapshot, user]
+  );
 
-  const handleSelectJob = useCallback((job: JobItem) => {
-    setSelectedJobId(job.id);
-    fetch(`/api/jobs/${encodeURIComponent(job.id)}/click`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ eventType: 'view_debate' }),
-    }).catch(() => {});
+  const handleSelectJob = useCallback(
+    (job: JobItem, eventType: 'inspect' | 'view_debate' = 'view_debate') => {
+      setSelectedJobId(job.id);
+      handleTrackClick(job.id, eventType);
+    },
+    [handleTrackClick]
+  );
+
+  const handleOpenApplication = useCallback((jobId: string) => {
+    setApplicationJobId(jobId);
   }, []);
 
   const handleStatusChange = useCallback(
@@ -110,13 +145,25 @@ export default function App() {
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Failed to update job status.');
+        if (user) {
+          void syncJobActionToCloud(user.uid, {
+            jobId: job.id,
+            status,
+          });
+          if (Array.isArray(data.weights)) {
+            void syncLearnedWeightsToCloud(user.uid, data.weights);
+          }
+          if (data.jurySnapshot) {
+            void recordJurySnapshot(data.jurySnapshot);
+          }
+        }
         notify(data.message || `Updated status to ${status}.`);
-        setRefreshSignal((n) => n + 1);
+        triggerRefresh();
       } catch (err) {
         setErrorBanner(err instanceof Error ? err.message : 'Status update failed.');
       }
     },
-    [notify]
+    [notify, recordJurySnapshot, triggerRefresh, user]
   );
 
   const handleRejectConfirm = useCallback(
@@ -128,45 +175,65 @@ export default function App() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to dismiss job.');
-      notify(data.message || 'Job dismissed and Jury trained.');
+      if (user) {
+        void syncJobActionToCloud(user.uid, {
+          jobId,
+          status: 'dismissed',
+          reason,
+          detail,
+        });
+        if (Array.isArray(data.weights)) {
+          void syncLearnedWeightsToCloud(user.uid, data.weights);
+        }
+        if (data.jurySnapshot) {
+          void recordJurySnapshot(data.jurySnapshot);
+        }
+      }
+      notify(data.message || 'Job disliked & Jury trained.');
       if (selectedJobId === jobId) {
         setSelectedJobId(null);
       }
-      setRefreshSignal((n) => n + 1);
+      triggerRefresh();
     },
-    [notify, selectedJobId]
+    [notify, recordJurySnapshot, selectedJobId, triggerRefresh, user]
   );
 
-  const handleConveneJury = useCallback(async (silentToast = false) => {
-    setIsConvening(true);
-    setErrorBanner(null);
-    try {
-      const res = await fetch('/api/jury/convene', { method: 'POST' });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Jury deliberation failed.');
-      lastCycleAtRef.current = Date.now();
-      if (!silentToast) {
-        notify(data.message || 'Supreme Jury deliberation complete.');
+  const handleConveneJury = useCallback(
+    async (silentToast = false) => {
+      setIsConvening(true);
+      setErrorBanner(null);
+      try {
+        const res = await fetch('/api/jury/convene', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Jury deliberation failed.');
+        lastCycleAtRef.current = Date.now();
+        if (data.jurySnapshot) {
+          void recordJurySnapshot(data.jurySnapshot);
+        }
+        if (!silentToast) {
+          notify(data.message || 'Supreme Jury deliberation complete.');
+        }
+        triggerRefresh();
+      } catch (err) {
+        setErrorBanner(err instanceof Error ? err.message : 'Unable to convene Jury.');
+      } finally {
+        setIsConvening(false);
       }
-      setRefreshSignal((n) => n + 1);
-    } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : 'Unable to convene Jury.');
-    } finally {
-      setIsConvening(false);
-    }
-  }, [notify]);
+    },
+    [notify, recordJurySnapshot, triggerRefresh]
+  );
 
   // Run fresh deliberation from scratch on every load/reload AND automatically every 24 hours
   useEffect(() => {
     if (!bootStartedRef.current) {
       bootStartedRef.current = true;
-      handleConveneJury(true);
+      void handleConveneJury(true);
     }
 
     const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
     const check24hCycle = () => {
       if (Date.now() - lastCycleAtRef.current >= TWENTY_FOUR_HOURS_MS) {
-        handleConveneJury(false);
+        void handleConveneJury(false);
       }
     };
 
@@ -183,6 +250,8 @@ export default function App() {
     };
   }, [handleConveneJury]);
 
+  const activeError = errorBanner || cloudError;
+
   return (
     <div
       className={
@@ -194,7 +263,7 @@ export default function App() {
       <TopNav
         activeTab={activeTab}
         onNavigate={setActiveTab}
-        onConveneJury={() => handleConveneJury(false)}
+        onConveneJury={() => void handleConveneJury(false)}
         isConvening={isConvening}
       />
 
@@ -225,9 +294,15 @@ export default function App() {
             : 'flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8'
         }
       >
-        {errorBanner && (
-          <div className={activeTab === 'jury' ? 'p-4 m-4 bg-red-50 border border-red-200 text-red-800 rounded-xl flex items-center justify-between gap-4 text-sm' : 'mb-6 p-4 bg-red-50 border border-red-200 text-red-800 rounded-xl flex items-center justify-between gap-4 text-sm'}>
-            <span>{errorBanner}</span>
+        {activeError && (
+          <div
+            className={
+              activeTab === 'jury'
+                ? 'p-4 m-4 bg-red-50 border border-red-200 text-red-800 rounded-xl flex items-center justify-between gap-4 text-sm'
+                : 'mb-6 p-4 bg-red-50 border border-red-200 text-red-800 rounded-xl flex items-center justify-between gap-4 text-sm'
+            }
+          >
+            <span>{activeError}</span>
             <button
               type="button"
               onClick={() => setErrorBanner(null)}
@@ -250,6 +325,9 @@ export default function App() {
             isConvening={isConvening}
             onStatusFilterChange={(next) => {
               setStatusFilter(next);
+              if (next === 'expired') {
+                setLivenessFilter('all');
+              }
               setPage(1);
             }}
             onSourceFilterChange={(next) => {
@@ -265,9 +343,9 @@ export default function App() {
             onSelectJob={handleSelectJob}
             onQuickStatus={handleStatusChange}
             onOpenReject={setRejectTarget}
-            onOpenApplication={setApplicationJobId}
+            onOpenApplication={handleOpenApplication}
             onTrackClick={handleTrackClick}
-            onConveneJury={() => handleConveneJury(false)}
+            onConveneJury={() => void handleConveneJury(false)}
             onNavigateTab={(tab) => setActiveTab(tab)}
           />
         )}
@@ -276,8 +354,11 @@ export default function App() {
           <JuryRoomView
             onStatusChange={handleStatusChange}
             onOpenReject={setRejectTarget}
-            onOpenApplication={setApplicationJobId}
-            onTrackClick={handleTrackClick}
+            onOpenApplication={(jobId) => {
+              handleTrackClick(jobId, 'view_drafts');
+              handleOpenApplication(jobId);
+            }}
+            onTrackClick={(jobId) => handleTrackClick(jobId, 'open_link')}
             onConveneJury={() => handleConveneJury(false)}
             isConvening={isConvening}
             refreshSignal={refreshSignal}
@@ -287,7 +368,7 @@ export default function App() {
         {activeTab === 'profile' && (
           <ProfileView
             onNotify={notify}
-            onProfileSaved={() => setRefreshSignal((n) => n + 1)}
+            onProfileSaved={triggerRefresh}
           />
         )}
 
@@ -315,7 +396,7 @@ export default function App() {
         onClose={() => setSelectedJobId(null)}
         onStatusChange={handleStatusChange}
         onOpenReject={setRejectTarget}
-        onOpenApplication={setApplicationJobId}
+        onOpenApplication={handleOpenApplication}
         onTrackClick={handleTrackClick}
       />
 
@@ -331,5 +412,18 @@ export default function App() {
         onNotify={notify}
       />
     </div>
+  );
+}
+
+export default function App() {
+  const [refreshSignal, setRefreshSignal] = useState(0);
+  const triggerRefresh = useCallback(() => {
+    setRefreshSignal((n) => n + 1);
+  }, []);
+
+  return (
+    <AuthProvider onWorkspaceHydrated={triggerRefresh}>
+      <AppWorkspace refreshSignal={refreshSignal} triggerRefresh={triggerRefresh} />
+    </AuthProvider>
   );
 }

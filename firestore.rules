@@ -1,0 +1,306 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function hasParentUserRoot(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId)) &&
+        get(/databases/$(database)/documents/users/$(userId)).data.ownerId == request.auth.uid;
+    }
+
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll([
+          'ownerId', 'name', 'citizenship', 'residence', 'degree',
+          'skills', 'target_roles', 'cv_text', 'cv_filename',
+          'experience_level', 'excluded_skills', 'excluded_job_terms',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'name', 'citizenship', 'residence', 'degree',
+          'skills', 'target_roles', 'cv_text', 'cv_filename',
+          'experience_level', 'excluded_skills', 'excluded_job_terms',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.ownerId == userId &&
+        isValidId(data.ownerId) &&
+        data.name is string && data.name.size() <= 120 &&
+        data.citizenship is string && data.citizenship.size() <= 120 &&
+        data.residence is string && data.residence.size() <= 120 &&
+        data.degree is string && data.degree.size() <= 200 &&
+        data.skills is string && data.skills.size() <= 3000 &&
+        data.target_roles is string && data.target_roles.size() <= 1500 &&
+        data.cv_text is string && data.cv_text.size() <= 120000 &&
+        data.cv_filename is string && data.cv_filename.size() <= 260 &&
+        data.experience_level in ['entry-level', 'mid-level', 'all'] &&
+        data.excluded_skills is string && data.excluded_skills.size() <= 600 &&
+        data.excluded_job_terms is string && data.excluded_job_terms.size() <= 600 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidJobAction(data, userId, jobId) {
+      return data.keys().hasAll([
+          'ownerId', 'jobId', 'status', 'reason', 'detail', 'clicks', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'jobId', 'status', 'reason', 'detail', 'clicks', 'createdAt', 'updatedAt'
+        ]) &&
+        data.ownerId == userId &&
+        isValidId(data.ownerId) &&
+        data.jobId == jobId &&
+        isValidId(data.jobId) &&
+        data.status in ['new', 'shortlisted', 'applied', 'dismissed'] &&
+        data.reason is string && data.reason.size() <= 80 &&
+        data.detail is string && data.detail.size() <= 500 &&
+        (data.clicks is int || data.clicks is float) &&
+        data.clicks >= 0 && data.clicks <= 10000 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidApplicationDoc(data, userId, jobId) {
+      return data.keys().hasAll([
+          'ownerId', 'jobId', 'tailored_cv', 'cover_letter', 'template', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'jobId', 'tailored_cv', 'cover_letter', 'template', 'createdAt', 'updatedAt'
+        ]) &&
+        data.ownerId == userId &&
+        isValidId(data.ownerId) &&
+        data.jobId == jobId &&
+        isValidId(data.jobId) &&
+        data.tailored_cv is string && data.tailored_cv.size() <= 120000 &&
+        data.cover_letter is string && data.cover_letter.size() <= 40000 &&
+        data.template in ['executive', 'modern', 'ats'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidLearnedWeight(data, userId) {
+      return data.keys().hasAll([
+          'ownerId', 'feature_type', 'feature_value', 'score_delta',
+          'positive_hits', 'negative_hits', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'feature_type', 'feature_value', 'score_delta',
+          'positive_hits', 'negative_hits', 'createdAt', 'updatedAt'
+        ]) &&
+        data.ownerId == userId &&
+        isValidId(data.ownerId) &&
+        data.feature_type is string && data.feature_type.size() >= 1 && data.feature_type.size() <= 64 &&
+        data.feature_value is string && data.feature_value.size() >= 1 && data.feature_value.size() <= 160 &&
+        (data.score_delta is int || data.score_delta is float) &&
+        data.score_delta >= -25 && data.score_delta <= 25 &&
+        (data.positive_hits is int || data.positive_hits is float) &&
+        data.positive_hits >= 0 && data.positive_hits <= 100000 &&
+        (data.negative_hits is int || data.negative_hits is float) &&
+        data.negative_hits >= 0 && data.negative_hits <= 100000 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidJuryDecision(data, userId, decisionId) {
+      return data.keys().hasAll([
+          'ownerId', 'sessionId', 'sessionDate', 'label',
+          'reviewedCount', 'matchedCount', 'dailyPicksCount',
+          'shortlistedCount', 'dismissedCount', 'avgMatchScore',
+          'topMatchScore', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'sessionId', 'sessionDate', 'label',
+          'reviewedCount', 'matchedCount', 'dailyPicksCount',
+          'shortlistedCount', 'dismissedCount', 'avgMatchScore',
+          'topMatchScore', 'createdAt', 'updatedAt'
+        ]) &&
+        data.ownerId == userId &&
+        isValidId(data.ownerId) &&
+        data.sessionId == decisionId &&
+        isValidId(data.sessionId) &&
+        data.sessionDate is string && data.sessionDate.size() >= 1 && data.sessionDate.size() <= 32 &&
+        data.label is string && data.label.size() >= 1 && data.label.size() <= 48 &&
+        (data.reviewedCount is int || data.reviewedCount is float) &&
+        data.reviewedCount >= 0 && data.reviewedCount <= 100000 &&
+        (data.matchedCount is int || data.matchedCount is float) &&
+        data.matchedCount >= 0 && data.matchedCount <= 100000 &&
+        (data.dailyPicksCount is int || data.dailyPicksCount is float) &&
+        data.dailyPicksCount >= 0 && data.dailyPicksCount <= 100 &&
+        (data.shortlistedCount is int || data.shortlistedCount is float) &&
+        data.shortlistedCount >= 0 && data.shortlistedCount <= 100000 &&
+        (data.dismissedCount is int || data.dismissedCount is float) &&
+        data.dismissedCount >= 0 && data.dismissedCount <= 100000 &&
+        (data.avgMatchScore is int || data.avgMatchScore is float) &&
+        data.avgMatchScore >= 0 && data.avgMatchScore <= 100 &&
+        (data.topMatchScore is int || data.topMatchScore is float) &&
+        data.topMatchScore >= 0 && data.topMatchScore <= 100 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow list: if isOwner(userId) && resource.data.ownerId == request.auth.uid;
+
+      allow create: if isValidId(userId) &&
+        isOwner(userId) &&
+        isValidUserProfile(incoming(), userId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isValidId(userId) &&
+        isOwner(userId) &&
+        isValidUserProfile(incoming(), userId) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'name', 'citizenship', 'residence', 'degree', 'skills',
+          'target_roles', 'cv_text', 'cv_filename', 'experience_level',
+          'excluded_skills', 'excluded_job_terms', 'updatedAt'
+        ]);
+
+      allow delete: if isValidId(userId) && isOwner(userId);
+
+      match /jobActions/{jobId} {
+        allow get: if isValidId(userId) && isValidId(jobId) && isOwner(userId) && hasParentUserRoot(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+
+        allow create: if isValidId(userId) &&
+          isValidId(jobId) &&
+          isOwner(userId) &&
+          hasParentUserRoot(userId) &&
+          isValidJobAction(incoming(), userId, jobId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+
+        allow update: if isValidId(userId) &&
+          isValidId(jobId) &&
+          isOwner(userId) &&
+          hasParentUserRoot(userId) &&
+          isValidJobAction(incoming(), userId, jobId) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().jobId == existing().jobId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'status', 'reason', 'detail', 'clicks', 'updatedAt'
+          ]);
+
+        allow delete: if isValidId(userId) && isValidId(jobId) && isOwner(userId) && hasParentUserRoot(userId);
+      }
+
+      match /applications/{jobId} {
+        allow get: if isValidId(userId) && isValidId(jobId) && isOwner(userId) && hasParentUserRoot(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+
+        allow create: if isValidId(userId) &&
+          isValidId(jobId) &&
+          isOwner(userId) &&
+          hasParentUserRoot(userId) &&
+          isValidApplicationDoc(incoming(), userId, jobId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+
+        allow update: if isValidId(userId) &&
+          isValidId(jobId) &&
+          isOwner(userId) &&
+          hasParentUserRoot(userId) &&
+          isValidApplicationDoc(incoming(), userId, jobId) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().jobId == existing().jobId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'tailored_cv', 'cover_letter', 'template', 'updatedAt'
+          ]);
+
+        allow delete: if isValidId(userId) && isValidId(jobId) && isOwner(userId) && hasParentUserRoot(userId);
+      }
+
+      match /learnedWeights/{weightId} {
+        allow get: if isValidId(userId) && isValidId(weightId) && isOwner(userId) && hasParentUserRoot(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+
+        allow create: if isValidId(userId) &&
+          isValidId(weightId) &&
+          isOwner(userId) &&
+          hasParentUserRoot(userId) &&
+          isValidLearnedWeight(incoming(), userId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+
+        allow update: if isValidId(userId) &&
+          isValidId(weightId) &&
+          isOwner(userId) &&
+          hasParentUserRoot(userId) &&
+          isValidLearnedWeight(incoming(), userId) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'feature_type', 'feature_value', 'score_delta',
+            'positive_hits', 'negative_hits', 'updatedAt'
+          ]);
+
+        allow delete: if isValidId(userId) && isValidId(weightId) && isOwner(userId) && hasParentUserRoot(userId);
+      }
+
+      match /juryDecisions/{decisionId} {
+        allow get: if isValidId(userId) && isValidId(decisionId) && isOwner(userId) && hasParentUserRoot(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+
+        allow create: if isValidId(userId) &&
+          isValidId(decisionId) &&
+          isOwner(userId) &&
+          hasParentUserRoot(userId) &&
+          isValidJuryDecision(incoming(), userId, decisionId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+
+        allow update: if isValidId(userId) &&
+          isValidId(decisionId) &&
+          isOwner(userId) &&
+          hasParentUserRoot(userId) &&
+          isValidJuryDecision(incoming(), userId, decisionId) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().sessionId == existing().sessionId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'sessionDate', 'label', 'reviewedCount', 'matchedCount',
+            'dailyPicksCount', 'shortlistedCount', 'dismissedCount',
+            'avgMatchScore', 'topMatchScore', 'updatedAt'
+          ]);
+
+        allow delete: if isValidId(userId) && isValidId(decisionId) && isOwner(userId) && hasParentUserRoot(userId);
+      }
+    }
+  }
+}

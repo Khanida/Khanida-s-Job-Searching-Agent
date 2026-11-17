@@ -103,9 +103,23 @@ export interface DashboardStats {
   shortlistedCount: number;
   appliedCount: number;
   newCount: number;
+  expiredCount: number;
   dismissedCount: number;
   liveCount: number;
   sources: Array<{ source: string; count: number }>;
+}
+
+export interface JuryDecisionSnapshot {
+  sessionId: string;
+  sessionDate: string;
+  label: string;
+  reviewedCount: number;
+  matchedCount: number;
+  dailyPicksCount: number;
+  shortlistedCount: number;
+  dismissedCount: number;
+  avgMatchScore: number;
+  topMatchScore: number;
 }
 
 export interface DashboardResponse {
@@ -120,6 +134,8 @@ export interface DashboardResponse {
   };
   profile: CandidateProfile;
   latestDeliberation: DeliberationSession | null;
+  jurySnapshot?: JuryDecisionSnapshot;
+  juryHistory?: JuryDecisionSnapshot[];
   googleSearchUrl: string;
 }
 

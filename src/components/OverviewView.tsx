@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import type { DashboardResponse, JobItem, JobStatus } from '../types.ts';
 import { AuthenticityLabel, LivenessLabel, PipelineStatusLabel } from './StatusText.tsx';
+import { CuteRadarWidget } from './CuteRadarWidget.tsx';
 
 interface OverviewViewProps {
   data: DashboardResponse | null;
@@ -25,11 +26,11 @@ interface OverviewViewProps {
   onLivenessFilterChange: (liveness: string) => void;
   onSearchInputChange: (value: string) => void;
   onPageChange: (page: number) => void;
-  onSelectJob: (job: JobItem) => void;
+  onSelectJob: (job: JobItem, eventType?: 'inspect' | 'view_debate') => void;
   onQuickStatus: (job: JobItem, status: JobStatus) => Promise<void>;
   onOpenReject: (job: JobItem) => void;
   onOpenApplication: (jobId: string) => void;
-  onTrackClick: (jobId: string) => void;
+  onTrackClick: (jobId: string, eventType?: 'click' | 'inspect' | 'open_link' | 'view_debate' | 'view_drafts') => void;
   onConveneJury: () => void;
   onNavigateTab: (tab: 'jury' | 'profile') => void;
 }
@@ -67,6 +68,7 @@ export function OverviewView({
     { key: 'shortlisted', label: 'Shortlisted', count: stats?.shortlistedCount },
     { key: 'applied', label: 'Applied', count: stats?.appliedCount },
     { key: 'new', label: 'New', count: stats?.newCount },
+    { key: 'expired', label: 'Expired', count: stats?.expiredCount ?? 0 },
   ];
   if (stats && stats.dismissedCount > 0) {
     statusTabs.push({ key: 'dismissed', label: 'Dismissed', count: stats.dismissedCount });
@@ -75,21 +77,31 @@ export function OverviewView({
   return (
     <div className="space-y-10">
       {/* Workspace Hero & Primary Controls */}
-      <section className="flex flex-col lg:flex-row lg:items-end justify-between gap-6 pb-8 border-b border-slate-200">
-        <div className="space-y-2.5 max-w-2xl">
-          <p className="text-xs font-medium text-slate-500">
-            {profile?.name || 'Candidate Workspace'}
-            {profile?.residence ? ` · ${profile.residence}` : ''}
-            {data?.latestDeliberation?.session_date
-              ? ` · Last deliberated ${data.latestDeliberation.session_date}`
-              : ''}
-          </p>
-          <h1 className="font-display text-3xl sm:text-4xl font-bold tracking-tight text-slate-900 text-balance">
-            Multi-agent career radar, calibrated to your profile.
-          </h1>
-          <p className="text-sm sm:text-base text-slate-600 leading-relaxed">
-            Scouts gather international and remote postings, Sub-Agents cross-examine CV fit and mobility evidence, and the Supreme Jury ranks your top reachable openings.
-          </p>
+      <section className="flex flex-col lg:flex-row lg:items-center justify-between gap-6 pb-8 border-b border-slate-200">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-5 max-w-3xl">
+          <div className="space-y-2.5 flex-1 min-w-0">
+            <p className="text-xs font-medium text-slate-500">
+              {profile?.name || 'Candidate Workspace'}
+              {profile?.residence ? ` · ${profile.residence}` : ''}
+              {data?.latestDeliberation?.session_date
+                ? ` · Last deliberated ${data.latestDeliberation.session_date}`
+                : ''}
+            </p>
+            <h1 className="font-display text-3xl sm:text-4xl font-bold tracking-tight text-slate-900 text-balance">
+              Multi-agent career radar, calibrated to your profile.
+            </h1>
+            <p className="text-sm sm:text-base text-slate-600 leading-relaxed">
+              Scouts gather international and remote postings, Sub-Agents cross-examine CV fit and mobility evidence, and the Supreme Jury ranks your top reachable openings.
+            </p>
+          </div>
+
+          <div className="self-start sm:self-center shrink-0 pb-2 sm:pb-0">
+            <CuteRadarWidget
+              isScanning={isConvening}
+              picksCount={stats?.dailyPicksCount ?? dailyPicks.length}
+              onClick={onConveneJury}
+            />
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-3 shrink-0">
@@ -199,7 +211,7 @@ export function OverviewView({
                   <div>
                     <button
                       type="button"
-                      onClick={() => onSelectJob(pick)}
+                      onClick={() => onSelectJob(pick, 'view_debate')}
                       className="text-left font-display text-base font-bold text-slate-900 hover:text-blue-600 transition-colors line-clamp-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 rounded"
                     >
                       {pick.title}
@@ -231,17 +243,20 @@ export function OverviewView({
                 <div className="pt-3 border-t border-slate-100 flex items-center justify-between gap-2">
                   <button
                     type="button"
-                    onClick={() => onSelectJob(pick)}
+                    onClick={() => onSelectJob(pick, 'view_debate')}
                     className="text-xs font-semibold text-blue-600 hover:text-blue-700 hover:underline whitespace-nowrap"
                   >
                     Read debate
                   </button>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1.5 flex-wrap justify-end">
                     {pick.status === 'shortlisted' || pick.status === 'applied' ? (
                       <button
                         type="button"
-                        onClick={() => onOpenApplication(pick.id)}
+                        onClick={() => {
+                          onTrackClick(pick.id, 'view_drafts');
+                          onOpenApplication(pick.id);
+                        }}
                         className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors whitespace-nowrap"
                       >
                         <FileText className="w-3.5 h-3.5" />
@@ -257,12 +272,24 @@ export function OverviewView({
                         Shortlist
                       </button>
                     )}
+
+                    <button
+                      type="button"
+                      onClick={() => onOpenReject(pick)}
+                      aria-label={`Dislike ${pick.title}`}
+                      title="Dislike & train Jury"
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:text-red-700 bg-white hover:bg-red-50 border border-slate-200 hover:border-red-200 rounded-md transition-colors whitespace-nowrap"
+                    >
+                      <ThumbsDown className="w-3.5 h-3.5" />
+                      <span>Dislike</span>
+                    </button>
+
                     {pick.url && (
                       <a
                         href={pick.url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        onClick={() => onTrackClick(pick.id)}
+                        onClick={() => onTrackClick(pick.id, 'open_link')}
                         aria-label={`Open ${pick.title} posting`}
                         className="p-1.5 text-slate-500 hover:text-slate-900 border border-slate-200 rounded-md hover:bg-slate-50 transition-colors"
                       >
@@ -455,7 +482,7 @@ export function OverviewView({
 
                     <button
                       type="button"
-                      onClick={() => onSelectJob(job)}
+                      onClick={() => onSelectJob(job, 'inspect')}
                       className="text-left font-display text-base font-semibold text-slate-900 hover:text-blue-600 transition-colors block max-w-full truncate focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 rounded"
                     >
                       {job.title}
@@ -483,16 +510,34 @@ export function OverviewView({
                     <div className="flex items-center gap-2">
                       <button
                         type="button"
-                        onClick={() => onSelectJob(job)}
+                        onClick={() => onSelectJob(job, 'inspect')}
                         className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors whitespace-nowrap"
                       >
                         Inspect
                       </button>
 
+                      {job.url && (
+                        <a
+                          href={job.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={() => onTrackClick(job.id, 'open_link')}
+                          aria-label={`Open ${job.title} posting`}
+                          title={job.url}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 hover:text-blue-700 hover:border-blue-300 hover:bg-blue-50/60 rounded-lg transition-colors whitespace-nowrap"
+                        >
+                          <span>Link</span>
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      )}
+
                       {job.status === 'shortlisted' || job.status === 'applied' ? (
                         <button
                           type="button"
-                          onClick={() => onOpenApplication(job.id)}
+                          onClick={() => {
+                            onTrackClick(job.id, 'view_drafts');
+                            onOpenApplication(job.id);
+                          }}
                           className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 border border-blue-200 hover:bg-blue-100 rounded-lg transition-colors whitespace-nowrap"
                         >
                           <FileText className="w-3.5 h-3.5" />

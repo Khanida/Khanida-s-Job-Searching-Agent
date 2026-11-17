@@ -49,16 +49,25 @@ interface JuryCourtroomCGIProps {
 }
 
 type CameraPreset = 'overview' | 'scouts' | 'debate' | 'jury';
-type WorkflowPhase = 'scout' | 'submit' | 'argue' | 'gavel' | 'celebrate';
+type WorkflowPhase = 'batch_submit' | 'select' | 'argue' | 'gavel' | 'celebrate';
 
-const CASE_DURATION = 14.0; // seconds per real job trial (allows full spoken arguments & gavel)
-const CELEBRATION_DURATION = 5.5; // courtroom clapping + confetti finale after 5th job is evaluated
+const BATCH_DURATION = 4.2; // seconds where ALL 4 scouts run & drop the batch of jobs onto Counsel desks at once
+const CASE_DURATION = 11.5; // seconds per individual job selected & argued one by one by Lawyers
+const CELEBRATION_DURATION = 5.5; // courtroom clapping + confetti finale after batch + top 5 evaluation completes
+
+function isCaseRejected(item: JuryRoomItem | undefined): boolean {
+  if (!item) return false;
+  const j = item.job;
+  if (j.status === 'dismissed') return true;
+  if (j.jury_verdict && /^(REJECTED|CONSTRAINED|DEFERRED)/i.test(j.jury_verdict)) return true;
+  return j.is_daily_pick === 0;
+}
 
 const CAMERA_PRESETS: Record<CameraPreset, { pos: [number, number, number]; target: [number, number, number] }> = {
   overview: { pos: [0, 8.8, 13.8], target: [0, 1.5, -0.8] },
-  scouts: { pos: [-11.2, 5.8, 7.6], target: [-5.4, 1.4, 1.1] },
-  debate: { pos: [4.8, 4.6, 7.4], target: [0, 1.7, -0.5] },
-  jury: { pos: [0, 4.9, 5.2], target: [0, 2.0, -3.5] },
+  scouts: { pos: [-10.8, 6.2, 8.4], target: [-4.6, 1.4, 1.2] },
+  debate: { pos: [4.8, 4.6, 7.6], target: [0, 1.6, 0.2] },
+  jury: { pos: [0, 5.1, 5.6], target: [0.6, 1.9, -3.0] },
 };
 
 const _tmpVecA = new THREE.Vector3();
@@ -93,7 +102,22 @@ export function JuryCourtroomCGI({
   const opponentBubbleRef = useRef<HTMLDivElement | null>(null);
   const juryBubbleRef = useRef<HTMLDivElement | null>(null);
 
-  const topCases = useMemo(() => items.slice(0, 5), [items]);
+  // Build richer courtroom trial docket (up to 10 cases: Top 5 Picks + up to 5 Rejected / Constrained / Dismissed roles)
+  const topCases = useMemo(() => {
+    const picks = items.filter((i) => i.job.is_daily_pick === 1 && i.job.status !== 'dismissed').slice(0, 5);
+    const pickIds = new Set(picks.map((p) => p.job.id));
+    const rejected = items
+      .filter((i) => !pickIds.has(i.job.id) && isCaseRejected(i))
+      .slice(0, 5);
+    const interleaved: JuryRoomItem[] = [];
+    const maxLen = Math.max(picks.length, rejected.length);
+    for (let i = 0; i < maxLen; i++) {
+      if (picks[i]) interleaved.push(picks[i]);
+      if (rejected[i]) interleaved.push(rejected[i]);
+    }
+    return interleaved.slice(0, 10);
+  }, [items]);
+
   const topCasesRef = useRef<JuryRoomItem[]>(topCases);
   topCasesRef.current = topCases;
 
@@ -106,10 +130,10 @@ export function JuryCourtroomCGI({
   const [playing, setPlaying] = useState(true);
   const [speed, setSpeed] = useState<1 | 1.5>(1);
   const [activeCaseIdx, setActiveCaseIdx] = useState(0);
-  const [phase, setPhase] = useState<WorkflowPhase>('scout');
+  const [phase, setPhase] = useState<WorkflowPhase>('batch_submit');
   const [speakerTurn, setSpeakerTurn] = useState<'proponent' | 'opponent' | 'examiner'>('proponent');
   const [gavelHitCount, setGavelHitCount] = useState(0);
-  const [evaluatedMask, setEvaluatedMask] = useState<boolean[]>([false, false, false, false, false]);
+  const [evaluatedMask, setEvaluatedMask] = useState<boolean[]>(() => Array(10).fill(false));
   const [cameraPreset, setCameraPreset] = useState<CameraPreset>('overview');
   const [autoFollowCamera, setAutoFollowCamera] = useState(true);
   const [dockCollapsed, setDockCollapsed] = useState(false);
@@ -120,13 +144,13 @@ export function JuryCourtroomCGI({
   const [cycleCompleted, setCycleCompleted] = useState(false);
 
   const totalCases = Math.max(1, topCases.length);
-  const totalDuration = totalCases * CASE_DURATION;
+  const totalDuration = BATCH_DURATION + totalCases * CASE_DURATION;
 
   const simRef = useRef({
     time: 0,
     playing: true,
     speed: 1,
-    totalCases: 5,
+    totalCases: 10,
     soundEnabled: true,
     cameraPreset: 'overview' as CameraPreset,
     autoFollowCamera: true,
@@ -170,9 +194,9 @@ export function JuryCourtroomCGI({
     simRef.current.cameraPreset = 'scouts';
     simRef.current.cameraAnimating = true;
     setActiveCaseIdx(0);
-    setPhase('scout');
+    setPhase('batch_submit');
     setGavelHitCount(0);
-    setEvaluatedMask([false, false, false, false, false]);
+    setEvaluatedMask(Array(10).fill(false));
     setCelebrating(false);
     setCycleCompleted(false);
     setPlaying(true);
@@ -186,16 +210,15 @@ export function JuryCourtroomCGI({
     }
   }, [isConvening, sessionId]);
 
-  const jumpToCase = (caseIdx: number, startPhase: Exclude<WorkflowPhase, 'celebrate'> = 'scout') => {
+  const jumpToCase = (caseIdx: number, startPhase: 'select' | 'argue' | 'gavel' = 'select') => {
     unlockCourtAudio();
-    const offsetMap: Record<Exclude<WorkflowPhase, 'celebrate'>, number> = {
-      scout: 0.05,
-      submit: 2.15,
-      argue: 3.45,
-      gavel: 10.65,
+    const offsetMap: Record<'select' | 'argue' | 'gavel', number> = {
+      select: 0.05,
+      argue: 2.15,
+      gavel: 8.85,
     };
     const clampedIdx = Math.max(0, Math.min(totalCases - 1, caseIdx));
-    simRef.current.time = clampedIdx * CASE_DURATION + offsetMap[startPhase];
+    simRef.current.time = BATCH_DURATION + clampedIdx * CASE_DURATION + offsetMap[startPhase];
     simRef.current.celebrationTriggered = false;
     simRef.current.completedTriggered = false;
     setCelebrating(false);
@@ -208,6 +231,10 @@ export function JuryCourtroomCGI({
   };
 
   const jumpToPhaseInCurrentCase = (targetPhase: Exclude<WorkflowPhase, 'celebrate'>) => {
+    if (targetPhase === 'batch_submit') {
+      resetTrialFromScratch(false);
+      return;
+    }
     jumpToCase(activeCaseIdx, targetPhase);
   };
 
@@ -344,7 +371,7 @@ export function JuryCourtroomCGI({
       if (hits.length > 0) {
         const idx = hits[0].object.userData?.pickIndex;
         if (typeof idx === 'number' && topCasesRef.current[idx]) {
-          simRef.current.time = idx * CASE_DURATION + 6.45;
+          simRef.current.time = BATCH_DURATION + idx * CASE_DURATION + 2.25;
           setActiveCaseIdx(idx);
           onSelectJobRef.current(topCasesRef.current[idx].job.id);
         }
@@ -381,7 +408,7 @@ export function JuryCourtroomCGI({
       proponent: new THREE.Vector3(),
       opponent: new THREE.Vector3(),
       jury: new THREE.Vector3(),
-      phase: 'scout' as WorkflowPhase,
+      phase: 'batch_submit' as WorkflowPhase,
     };
 
     let frameId = 0;
@@ -408,7 +435,7 @@ export function JuryCourtroomCGI({
       vw: number,
       vh: number,
       halfWidth = 155,
-      minY = 148
+      minTop = 190
     ) {
       if (!el) return;
       if (!visible) {
@@ -416,22 +443,171 @@ export function JuryCourtroomCGI({
         el.style.transform = 'translate3d(-9999px, -9999px, 0)';
         return;
       }
+      const bubbleHeight = el.offsetHeight || 115;
       const clampedX = Math.max(halfWidth, Math.min(vw - halfWidth, x));
-      const clampedY = Math.max(minY, Math.min(vh - 150, y));
+      const minBottomY = Math.min(vh - 190, minTop + bubbleHeight + 12);
+      const clampedY = Math.max(minBottomY, Math.min(vh - 185, y));
       el.style.opacity = '1';
       el.style.transform = `translate3d(${Math.round(clampedX)}px, ${Math.round(clampedY)}px, 0) translate(-50%, calc(-100% - 10px))`;
     }
 
+    function getDestinationPosition(idx: number): { pos: THREE.Vector3; rejected: boolean } {
+      const cases = topCasesRef.current;
+      let approvedSlot = 0;
+      let rejectedSlot = 0;
+      for (let i = 0; i < idx; i++) {
+        if (isCaseRejected(cases[i])) rejectedSlot++;
+        else approvedSlot++;
+      }
+      const rejected = isCaseRejected(cases[idx]);
+      if (rejected) {
+        const refDossier = rig.evaluatedDossiers[rejectedSlot % 5];
+        return { pos: refDossier.rejectedPos, rejected: true };
+      }
+      const refDossier = rig.evaluatedDossiers[approvedSlot % 5];
+      return { pos: refDossier.pedestalPos, rejected: false };
+    }
+
     function updateChoreography(t: number, delta: number) {
       const count = simRef.current.totalCases;
-      const casesDuration = count * CASE_DURATION;
-      const fullDuration = casesDuration + CELEBRATION_DURATION;
-      const isCelebrationWindow = t >= casesDuration && t < fullDuration;
+      const casesEnd = BATCH_DURATION + count * CASE_DURATION;
+      const fullDuration = casesEnd + CELEBRATION_DURATION;
+      const isBatchPhase = t < BATCH_DURATION;
+      const isCelebrationWindow = t >= casesEnd && t < fullDuration;
       const isFinished = t >= fullDuration;
 
-      // Celebration & Completed Terminal State
+      // Helper for smooth camera
+      const updateCamera = () => {
+        if (simRef.current.cameraAnimating) {
+          const preset = CAMERA_PRESETS[simRef.current.cameraPreset];
+          _camPosTarget.set(...preset.pos);
+          _camLookTarget.set(...preset.target);
+          const alpha = 1 - Math.exp(-3.6 * delta);
+          camera.position.lerp(_camPosTarget, alpha);
+          controls.target.lerp(_camLookTarget, alpha);
+          if (camera.position.distanceTo(_camPosTarget) < 0.06) {
+            simRef.current.cameraAnimating = false;
+          }
+        }
+        controls.update();
+      };
+
+      // --- ACT 0: ALL 4 WORKER SCOUTS SUBMIT A BUNCH OF JOBS AT ONCE ---
+      if (isBatchPhase) {
+        rig.celebrationConfetti.visible = false;
+        headAnchors.phase = 'batch_submit';
+        if (simRef.current.lastPhase !== 'batch_submit') {
+          simRef.current.lastPhase = 'batch_submit';
+          setPhase('batch_submit');
+          setActiveCaseIdx(0);
+          if (simRef.current.autoFollowCamera) {
+            simRef.current.cameraPreset = 'scouts';
+            simRef.current.cameraAnimating = true;
+            setCameraPreset('scouts');
+          }
+        }
+        updateCamera();
+
+        rig.scouts.forEach((scout, idx) => {
+          scout.leftArm.rotation.z = 0;
+          scout.rightArm.rotation.z = 0;
+          if (t < 1.65) {
+            const p = smoothStep(0, 1.05, t);
+            scout.group.position.lerpVectors(scout.homePos, scout.boardPos, p);
+            scout.group.lookAt(scout.boardPos.x - 1.4, 0, scout.boardPos.z);
+            const stride = Math.sin(t * 10 + idx) * 0.55 * (1 - p * 0.45);
+            scout.leftLeg.rotation.x = stride;
+            scout.rightLeg.rotation.x = -stride;
+            const reach = t > 0.95 ? Math.sin(((t - 0.95) / 0.7) * Math.PI) : 0;
+            scout.rightArm.rotation.x = -reach * 1.2;
+            scout.leftArm.rotation.x = -reach * 0.7;
+            scout.carriedDossier.visible = t > 1.05;
+          } else if (t < 3.25) {
+            const p = smoothStep(1.65, 3.05, t);
+            scout.group.position.lerpVectors(scout.boardPos, scout.deskPos, p);
+            _tmpVecA.subVectors(scout.deskPos, scout.boardPos);
+            if (_tmpVecA.lengthSq() > 0.001) {
+              scout.group.rotation.y = Math.atan2(_tmpVecA.x, _tmpVecA.z);
+            }
+            const stride = Math.sin(t * 11 + idx) * 0.55;
+            scout.leftLeg.rotation.x = stride;
+            scout.rightLeg.rotation.x = -stride;
+            scout.leftArm.rotation.x = -0.95;
+            scout.rightArm.rotation.x = -0.95;
+            scout.group.position.y = Math.abs(Math.sin(t * 11 + idx)) * 0.06;
+            scout.carriedDossier.visible = t < 2.95;
+          } else {
+            const p = smoothStep(3.25, 4.15, t);
+            scout.group.position.lerpVectors(scout.deskPos, scout.homePos, p);
+            scout.group.rotation.y = Math.atan2(
+              scout.homePos.x - scout.deskPos.x,
+              scout.homePos.z - scout.deskPos.z
+            );
+            const stride = Math.sin(t * 9 + idx) * 0.35 * (1 - p);
+            scout.leftLeg.rotation.x = stride;
+            scout.rightLeg.rotation.x = -stride;
+            scout.leftArm.rotation.x = 0;
+            scout.rightArm.rotation.x = 0;
+            scout.group.position.y = 0;
+            scout.carriedDossier.visible = false;
+          }
+        });
+
+        headAnchors.scout.set(
+          rig.scouts[1].group.position.x,
+          rig.scouts[1].group.position.y + 1.95,
+          rig.scouts[1].group.position.z
+        );
+
+        // Lawyers await the batch stack calmly at their desks
+        rig.lawyers.forEach((lawyer, idx) => {
+          lawyer.group.position.lerp(lawyer.seatPos, 1 - Math.exp(-4 * delta));
+          lawyer.group.rotation.y = Math.PI - 0.25;
+          lawyer.torso.rotation.x = 0;
+          lawyer.leftArm.rotation.z = 0;
+          lawyer.rightArm.rotation.z = 0;
+          lawyer.leftArm.rotation.x = Math.sin(t * 1.6 + idx) * 0.05;
+          lawyer.rightArm.rotation.x = -Math.sin(t * 1.6 + idx) * 0.05;
+          lawyer.head.rotation.y = -0.35;
+        });
+
+        rig.judges.forEach((judge) => {
+          judge.head.rotation.y = -0.15;
+          judge.head.rotation.x = 0;
+          judge.leftArm.rotation.x = -0.35;
+          judge.rightArm.rotation.x = -0.65;
+        });
+
+        (rig.spotlightCone.material as THREE.MeshBasicMaterial).opacity = 0;
+        (rig.debateBeamA.material as THREE.MeshBasicMaterial).opacity = 0;
+        (rig.debateBeamB.material as THREE.MeshBasicMaterial).opacity = 0;
+        (rig.gavelShockwave.material as THREE.MeshBasicMaterial).opacity = 0;
+
+        // Entire bunch of jobs lands on Counsel desks together around t = 2.9s!
+        const batchLanded = t >= 2.85;
+        const dropProgress = batchLanded ? smoothStep(2.85, 3.3, t) : 0;
+        rig.evaluatedDossiers.forEach((item, idx) => {
+          item.group.visible = batchLanded && idx < count;
+          item.group.position.set(
+            item.startPos.x,
+            item.startPos.y + (1 - dropProgress) * (0.45 + (idx % 3) * 0.14),
+            item.startPos.z
+          );
+          item.group.rotation.set(0, (idx % 3 - 1) * 0.08, 0);
+          (item.glowRing.material as THREE.MeshBasicMaterial).opacity = 0;
+        });
+        rig.pedestalRings.forEach((r) => {
+          (r.material as THREE.MeshBasicMaterial).opacity = 0.12;
+        });
+        rig.rejectedRings.forEach((r) => {
+          (r.material as THREE.MeshBasicMaterial).opacity = 0.14;
+        });
+        return;
+      }
+
+      // --- ACT FINAL: CELEBRATION & CLAPPING AFTER BATCH & TOP 5 EVALUATED ---
       if (isCelebrationWindow || isFinished) {
-        const celebrateTime = Math.max(0, t - casesDuration);
+        const celebrateTime = Math.max(0, t - casesEnd);
         headAnchors.phase = 'celebrate';
         if (simRef.current.lastPhase !== 'celebrate') {
           simRef.current.lastPhase = 'celebrate';
@@ -446,12 +622,12 @@ export function JuryCourtroomCGI({
         if (!simRef.current.celebrationTriggered) {
           simRef.current.celebrationTriggered = true;
           setCelebrating(true);
-          setEvaluatedMask([true, true, true, true, true]);
+          setEvaluatedMask(Array(10).fill(true));
           if (simRef.current.soundEnabled) {
             playCelebrationApplause();
             speakCourtLine(
               'judge',
-              `Order and applause! Today's top ${count} positions are evaluated and certified by the Supreme Jury.`,
+              `Order and applause! All ${count} submitted roles—approved picks and rejected leads alike—are evaluated and sealed.`,
               simRef.current.speed
             );
           }
@@ -465,25 +641,12 @@ export function JuryCourtroomCGI({
           setPlaying(false);
         }
 
-        // Smooth camera damping
-        if (simRef.current.cameraAnimating) {
-          const preset = CAMERA_PRESETS[simRef.current.cameraPreset];
-          _camPosTarget.set(...preset.pos);
-          _camLookTarget.set(...preset.target);
-          const alpha = 1 - Math.exp(-3.6 * delta);
-          camera.position.lerp(_camPosTarget, alpha);
-          controls.target.lerp(_camLookTarget, alpha);
-          if (camera.position.distanceTo(_camPosTarget) < 0.06) {
-            simRef.current.cameraAnimating = false;
-          }
-        }
-        controls.update();
+        updateCamera();
 
         const clapOsc = isCelebrationWindow
           ? Math.abs(Math.sin(celebrateTime * 13.0)) * 0.36
           : 0;
 
-        // Scouts bounce & clap toward center court
         rig.scouts.forEach((scout, idx) => {
           scout.group.position.lerp(scout.homePos, 1 - Math.exp(-4 * delta));
           scout.group.position.y = isCelebrationWindow
@@ -506,7 +669,6 @@ export function JuryCourtroomCGI({
           }
         });
 
-        // Lawyers face jury/center and applaud together
         rig.lawyers.forEach((lawyer, idx) => {
           lawyer.group.position.lerp(lawyer.seatPos, 1 - Math.exp(-4 * delta));
           lawyer.group.rotation.y = Math.PI;
@@ -525,7 +687,6 @@ export function JuryCourtroomCGI({
           }
         });
 
-        // Tall Judges nod and applaud behind bench
         rig.judges.forEach((judge, idx) => {
           judge.head.rotation.y = isCelebrationWindow ? Math.sin(celebrateTime * 3.5 + idx) * 0.15 : 0;
           judge.head.rotation.x = isCelebrationWindow ? Math.sin(celebrateTime * 6 + idx) * 0.08 : 0;
@@ -542,7 +703,6 @@ export function JuryCourtroomCGI({
           }
         });
 
-        // Calm beams/spotlight/shockwave, balanced scales, glowing 5 certified pedestals
         (rig.spotlightCone.material as THREE.MeshBasicMaterial).opacity = 0;
         (rig.debateBeamA.material as THREE.MeshBasicMaterial).opacity = 0;
         (rig.debateBeamB.material as THREE.MeshBasicMaterial).opacity = 0;
@@ -550,17 +710,24 @@ export function JuryCourtroomCGI({
         rig.scalesBeam.rotation.z = THREE.MathUtils.lerp(rig.scalesBeam.rotation.z, 0, 0.16);
 
         rig.evaluatedDossiers.forEach((item, idx) => {
-          const ringMat = rig.pedestalRings[idx].material as THREE.MeshBasicMaterial;
-          const glowMat = item.glowRing.material as THREE.MeshBasicMaterial;
           item.group.visible = idx < count;
-          item.group.position.copy(item.pedestalPos);
+          if (idx >= count) return;
+          const dest = getDestinationPosition(idx);
+          item.group.position.copy(dest.pos);
           item.group.rotation.set(-0.22, 0, 0);
-          ringMat.color.setHex(isCelebrationWindow ? 0xfbbf24 : 0x10b981);
-          ringMat.opacity = isCelebrationWindow ? 0.65 + Math.sin(celebrateTime * 8 + idx) * 0.25 : 0.78;
-          glowMat.opacity = 0.42;
+          (item.glowRing.material as THREE.MeshBasicMaterial).color.setHex(dest.rejected ? 0xef4444 : 0x10b981);
+          (item.glowRing.material as THREE.MeshBasicMaterial).opacity = 0.45;
         });
 
-        // Animate celebration confetti rain during applause window
+        rig.pedestalRings.forEach((ring, idx) => {
+          const ringMat = ring.material as THREE.MeshBasicMaterial;
+          ringMat.color.setHex(isCelebrationWindow ? 0xfbbf24 : 0x10b981);
+          ringMat.opacity = isCelebrationWindow ? 0.65 + Math.sin(celebrateTime * 8 + idx) * 0.25 : 0.78;
+        });
+        rig.rejectedRings.forEach((ring) => {
+          (ring.material as THREE.MeshBasicMaterial).opacity = 0.72;
+        });
+
         rig.celebrationConfetti.visible = isCelebrationWindow;
         if (isCelebrationWindow) {
           for (let i = 0; i < rig.confettiMeta.length; i++) {
@@ -582,17 +749,19 @@ export function JuryCourtroomCGI({
         return;
       }
 
-      // Active Trial Loop (Cases 0..count-1)
+      // --- ACT 1..N: LAWYERS SELECT NEXT JOB FROM BATCH & ARGUE ONE BY ONE ---
       rig.celebrationConfetti.visible = false;
-      const caseIdx = Math.min(count - 1, Math.floor(t / CASE_DURATION));
-      const localT = t - caseIdx * CASE_DURATION;
+      const caseT = t - BATCH_DURATION;
+      const caseIdx = Math.min(count - 1, Math.floor(caseT / CASE_DURATION));
+      const localT = caseT - caseIdx * CASE_DURATION;
+      const currentRejected = isCaseRejected(topCasesRef.current[caseIdx]);
 
       const currentPhase: WorkflowPhase =
-        localT < 2.1 ? 'scout' : localT < 3.4 ? 'submit' : localT < 10.6 ? 'argue' : 'gavel';
+        localT < 2.1 ? 'select' : localT < 8.8 ? 'argue' : 'gavel';
       headAnchors.phase = currentPhase;
 
       const currentTurn: 'proponent' | 'opponent' | 'examiner' =
-        localT < 6.0 ? 'proponent' : localT < 8.4 ? 'opponent' : 'examiner';
+        localT < 4.5 ? 'proponent' : localT < 6.65 ? 'opponent' : 'examiner';
 
       if (caseIdx !== simRef.current.lastCaseIdx) {
         simRef.current.lastCaseIdx = caseIdx;
@@ -608,13 +777,11 @@ export function JuryCourtroomCGI({
         setPhase(currentPhase);
         if (simRef.current.autoFollowCamera) {
           const nextCam: CameraPreset =
-            currentPhase === 'scout'
-              ? 'scouts'
-              : currentPhase === 'submit'
-                ? 'overview'
-                : currentPhase === 'argue'
-                  ? 'debate'
-                  : 'jury';
+            currentPhase === 'select'
+              ? 'overview'
+              : currentPhase === 'argue'
+                ? 'debate'
+                : 'jury';
           simRef.current.cameraPreset = nextCam;
           simRef.current.cameraAnimating = true;
           setCameraPreset(nextCam);
@@ -626,88 +793,23 @@ export function JuryCourtroomCGI({
         setSpeakerTurn(currentTurn);
       }
 
-      // Smooth camera damping
-      if (simRef.current.cameraAnimating) {
-        const preset = CAMERA_PRESETS[simRef.current.cameraPreset];
-        _camPosTarget.set(...preset.pos);
-        _camLookTarget.set(...preset.target);
-        const alpha = 1 - Math.exp(-3.6 * delta);
-        camera.position.lerp(_camPosTarget, alpha);
-        controls.target.lerp(_camLookTarget, alpha);
-        if (camera.position.distanceTo(_camPosTarget) < 0.06) {
-          simRef.current.cameraAnimating = false;
-        }
-      }
-      controls.update();
+      updateCamera();
 
-      // --- 1. DEPARTMENT-SPECIALIZED SCOUT FINDS & SUBMITS CURRENT JOB ---
-      const currentCaseJob = topCasesRef.current[caseIdx]?.job;
-      const activeScoutIdx = currentCaseJob
-        ? classifyJobDepartment(currentCaseJob).index % rig.scouts.length
-        : caseIdx % rig.scouts.length;
+      // Scouts watch calmly from wing after submitting the whole batch
       rig.scouts.forEach((scout, idx) => {
+        scout.group.position.lerp(scout.homePos, 1 - Math.exp(-5 * delta));
+        scout.group.rotation.y = 0.85;
+        scout.leftLeg.rotation.x = 0;
+        scout.rightLeg.rotation.x = 0;
         scout.leftArm.rotation.z = 0;
         scout.rightArm.rotation.z = 0;
-        if (idx !== activeScoutIdx) {
-          scout.group.position.lerp(scout.homePos, 1 - Math.exp(-4 * delta));
-          scout.group.rotation.y = 0.85;
-          scout.leftLeg.rotation.x = 0;
-          scout.rightLeg.rotation.x = 0;
-          scout.leftArm.rotation.x = Math.sin(t * 1.4 + idx) * 0.05;
-          scout.rightArm.rotation.x = -Math.sin(t * 1.4 + idx) * 0.05;
-          scout.carriedDossier.visible = false;
-          return;
-        }
-
-        if (localT < 2.1) {
-          const p = smoothStep(0, 1.3, localT);
-          scout.group.position.lerpVectors(scout.homePos, scout.boardPos, p);
-          scout.group.lookAt(scout.boardPos.x - 1.4, 0, scout.boardPos.z);
-          const stride = Math.sin(localT * 10) * 0.55 * (1 - p * 0.5);
-          scout.leftLeg.rotation.x = stride;
-          scout.rightLeg.rotation.x = -stride;
-          const reach = localT > 1.25 ? Math.sin(((localT - 1.25) / 0.85) * Math.PI) : 0;
-          scout.rightArm.rotation.x = -reach * 1.25;
-          scout.leftArm.rotation.x = -reach * 0.6;
-          scout.carriedDossier.visible = localT > 1.5;
-        } else if (localT < 3.5) {
-          const p = smoothStep(2.1, 3.35, localT);
-          scout.group.position.lerpVectors(scout.boardPos, scout.deskPos, p);
-          _tmpVecA.subVectors(scout.deskPos, scout.boardPos);
-          if (_tmpVecA.lengthSq() > 0.001) {
-            scout.group.rotation.y = Math.atan2(_tmpVecA.x, _tmpVecA.z);
-          }
-          const stride = Math.sin(localT * 11) * 0.55;
-          scout.leftLeg.rotation.x = stride;
-          scout.rightLeg.rotation.x = -stride;
-          scout.leftArm.rotation.x = -0.85;
-          scout.rightArm.rotation.x = -0.85;
-          scout.group.position.y = Math.abs(Math.sin(localT * 11)) * 0.05;
-          scout.carriedDossier.visible = p < 0.9;
-        } else {
-          const p = smoothStep(3.5, 4.7, localT);
-          scout.group.position.lerpVectors(scout.deskPos, scout.homePos, p);
-          scout.group.rotation.y = Math.atan2(
-            scout.homePos.x - scout.deskPos.x,
-            scout.homePos.z - scout.deskPos.z
-          );
-          const stride = Math.sin(localT * 9) * 0.35 * (1 - p);
-          scout.leftLeg.rotation.x = stride;
-          scout.rightLeg.rotation.x = -stride;
-          scout.leftArm.rotation.x = 0;
-          scout.rightArm.rotation.x = 0;
-          scout.group.position.y = 0;
-          scout.carriedDossier.visible = false;
-        }
-
-        headAnchors.scout.set(
-          scout.group.position.x,
-          scout.group.position.y + 1.85,
-          scout.group.position.z
-        );
+        scout.leftArm.rotation.x = Math.sin(t * 1.4 + idx) * 0.04;
+        scout.rightArm.rotation.x = -Math.sin(t * 1.4 + idx) * 0.04;
+        scout.carriedDossier.visible = false;
       });
+      headAnchors.scout.set(rig.lawyers[0].group.position.x, rig.lawyers[0].group.position.y + 2.02, rig.lawyers[0].group.position.z);
 
-      // --- 2. LAWYERS PRESENT & ARGUE IN FRONT OF JURY ---
+      // Lawyers select next dossier cleanly then argue one by one
       let activeSpeakerIdx = -1;
       let opposerIdx = -1;
       if (currentPhase === 'argue') {
@@ -725,19 +827,28 @@ export function JuryCourtroomCGI({
       rig.lawyers.forEach((lawyer, idx) => {
         lawyer.leftArm.rotation.z = 0;
         lawyer.rightArm.rotation.z = 0;
+        const isSelectingLead = currentPhase === 'select' && idx === 0;
         const isSpeaking = idx === activeSpeakerIdx;
         const isOpposing = idx === opposerIdx;
 
-        const targetPos = isSpeaking
-          ? lawyer.podiumPos
-          : isOpposing
-            ? _tmpVecB.lerpVectors(lawyer.seatPos, lawyer.podiumPos, 0.62)
-            : lawyer.seatPos;
+        const targetPos = isSelectingLead
+          ? _tmpVecA.lerpVectors(lawyer.seatPos, rig.evaluatedDossiers[caseIdx]?.reviewPos || lawyer.podiumPos, 0.55)
+          : isSpeaking
+            ? lawyer.podiumPos
+            : isOpposing
+              ? _tmpVecB.lerpVectors(lawyer.seatPos, lawyer.podiumPos, 0.62)
+              : lawyer.seatPos;
 
         const moveAlpha = 1 - Math.exp(-5.5 * delta);
         lawyer.group.position.lerp(targetPos, moveAlpha);
 
-        if (isSpeaking) {
+        if (isSelectingLead) {
+          lawyer.group.rotation.y = Math.PI + Math.sin(t * 2) * 0.1;
+          lawyer.torso.rotation.x = 0.14;
+          lawyer.rightArm.rotation.x = -1.15;
+          lawyer.leftArm.rotation.x = -0.85;
+          lawyer.head.rotation.y = 0;
+        } else if (isSpeaking) {
           lawyer.group.rotation.y = Math.PI + Math.sin(t * 2.5) * 0.14;
           lawyer.torso.rotation.x = 0.09 + Math.sin(t * 6.5) * 0.04;
           lawyer.rightArm.rotation.x = -1.2 + Math.sin(t * 10.5) * 0.45;
@@ -812,12 +923,13 @@ export function JuryCourtroomCGI({
         beamMatB.opacity = 0;
       }
 
-      // --- 3. TALL JURY ARBITERS & GAVEL STRIKE ON EVERY SINGLE JOB ---
+      // Supreme Jury Judges + Gavel Shockwave (Emerald for Approved, Crimson for Rejected!)
       const shockMat = rig.gavelShockwave.material as THREE.MeshBasicMaterial;
       let gavelArmAngle = -0.65;
 
       if (currentPhase === 'gavel') {
-        const gTime = localT - 10.6;
+        const gTime = localT - 8.8;
+        shockMat.color.setHex(currentRejected ? 0xef4444 : 0xf59e0b);
         if (gTime < 1.45) {
           const pulseIdx = gTime < 0.72 ? 0 : 1;
           const pulseLocal = pulseIdx === 0 ? gTime : gTime - 0.72;
@@ -856,6 +968,7 @@ export function JuryCourtroomCGI({
         shockMat.opacity = 0;
       }
 
+      const destNow = getDestinationPosition(caseIdx);
       rig.judges.forEach((judge, idx) => {
         judge.leftArm.rotation.x = -0.35;
         judge.leftArm.rotation.z = 0;
@@ -865,10 +978,9 @@ export function JuryCourtroomCGI({
           judge.head.rotation.y = (speaker.group.position.x - judge.basePos.x) * 0.14;
           judge.head.rotation.x = 0.08 + Math.sin(t * 4 + idx) * 0.04;
         } else if (currentPhase === 'gavel') {
-          const targetPedX = rig.evaluatedDossiers[caseIdx]?.pedestalPos.x ?? 0;
           judge.head.rotation.y = THREE.MathUtils.lerp(
             judge.head.rotation.y,
-            (targetPedX - judge.basePos.x) * 0.12,
+            (destNow.pos.x - judge.basePos.x) * 0.12,
             0.12
           );
           judge.head.rotation.x = 0.12;
@@ -891,7 +1003,6 @@ export function JuryCourtroomCGI({
         chiefJudge.group.position.z
       );
 
-      // Scales of Justice reaction
       if (currentPhase === 'argue') {
         rig.scalesBeam.rotation.z = Math.sin(t * 3.8) * 0.24;
       } else if (currentPhase === 'gavel') {
@@ -900,47 +1011,57 @@ export function JuryCourtroomCGI({
         rig.scalesBeam.rotation.z = Math.sin(t * 1.4) * 0.06;
       }
 
-      // --- 4. 5 EVALUATED JOB DOSSIERS ON COUNSEL DESKS & JURY PEDESTALS ---
+      // Position all 10 dossiers: queued sit in Counsel batch tray -> active lifts to Exam Lectern -> finished lands on Approved Pedestal OR Crimson Rejected Rail!
       rig.evaluatedDossiers.forEach((item, idx) => {
-        const ringMat = rig.pedestalRings[idx].material as THREE.MeshBasicMaterial;
+        item.group.visible = idx < count;
+        if (idx >= count) return;
         const glowMat = item.glowRing.material as THREE.MeshBasicMaterial;
+        const dest = getDestinationPosition(idx);
         const isCurrent = idx === caseIdx;
-        const alreadyEvaluated = idx < caseIdx || (isCurrent && localT >= 11.1);
-        const isSelected = topCasesRef.current[idx]?.job.id === selectedJobIdRef.current;
 
-        if (idx > caseIdx || (isCurrent && localT < 3.0)) {
-          item.group.visible = isCurrent && localT > 2.4;
+        if (idx > caseIdx) {
+          // Waiting in the Counsel desk batch stack
           item.group.position.copy(item.startPos);
-          item.group.rotation.set(0, 0, 0);
-          ringMat.color.setHex(isSelected ? 0xf59e0b : 0x3b82f6);
-          ringMat.opacity = isCurrent ? 0.25 : 0.1;
+          item.group.rotation.set(0, (idx % 3 - 1) * 0.08, 0);
           glowMat.opacity = 0;
-        } else if (isCurrent && localT < 11.1) {
-          item.group.visible = true;
-          item.group.position.copy(item.startPos);
-          item.group.position.y = item.startPos.y + Math.sin(t * 3.5) * 0.025;
+        } else if (isCurrent && localT < 2.1) {
+          // Lawyer selects this dossier from the stack onto the center Examination Lectern
+          const p = smoothStep(0.15, 1.75, localT);
+          item.group.position.lerpVectors(item.startPos, item.reviewPos, p);
+          item.group.position.y += Math.sin(p * Math.PI) * 0.85;
+          item.group.rotation.set(0, p * Math.PI * 0.5, 0);
+          glowMat.color.setHex(0x60a5fa);
+          glowMat.opacity = p * 0.35;
+        } else if (isCurrent && localT < 9.35) {
+          // Under argument on center lectern
+          item.group.position.copy(item.reviewPos);
+          item.group.position.y = item.reviewPos.y + Math.sin(t * 3.5) * 0.025;
           item.group.rotation.set(0, Math.sin(t * 1.2) * 0.12, 0);
-          ringMat.color.setHex(0x60a5fa);
-          ringMat.opacity = 0.35;
-          glowMat.opacity = 0;
-        } else if (isCurrent && localT >= 11.1) {
-          item.group.visible = true;
-          const p = smoothStep(11.1, 12.6, localT);
-          item.group.position.lerpVectors(item.startPos, item.pedestalPos, p);
-          item.group.position.y += Math.sin(p * Math.PI) * 1.9;
+          glowMat.color.setHex(dest.rejected ? 0xef4444 : 0x60a5fa);
+          glowMat.opacity = 0.32;
+        } else if (isCurrent && localT >= 9.35) {
+          // Gavel struck! Fly to Approved Jury Pedestal OR Crimson Rejected Case Rail!
+          const p = smoothStep(9.35, 10.9, localT);
+          item.group.position.lerpVectors(item.reviewPos, dest.pos, p);
+          item.group.position.y += Math.sin(p * Math.PI) * 1.85;
           item.group.rotation.y = p * Math.PI * 2;
           item.group.rotation.x = p >= 0.98 ? -0.22 : Math.sin(p * Math.PI) * 0.35;
-          ringMat.color.setHex(isSelected ? 0xf59e0b : 0x10b981);
-          ringMat.opacity = p >= 0.9 ? 0.85 : 0.45;
-          glowMat.opacity = p >= 0.9 ? 0.5 : 0;
+          glowMat.color.setHex(dest.rejected ? 0xef4444 : 0x10b981);
+          glowMat.opacity = p >= 0.85 ? 0.5 : 0.15;
         } else {
-          item.group.visible = true;
-          item.group.position.copy(item.pedestalPos);
+          // Already judged & placed on either pedestal or crimson rail
+          item.group.position.copy(dest.pos);
           item.group.rotation.set(-0.22, 0, 0);
-          ringMat.color.setHex(isSelected ? 0xf59e0b : alreadyEvaluated ? 0x10b981 : 0x3b82f6);
-          ringMat.opacity = isSelected ? 0.9 : 0.65;
-          glowMat.opacity = 0.35;
+          glowMat.color.setHex(dest.rejected ? 0xef4444 : 0x10b981);
+          glowMat.opacity = 0.38;
         }
+      });
+
+      rig.pedestalRings.forEach((ring) => {
+        (ring.material as THREE.MeshBasicMaterial).opacity = 0.45;
+      });
+      rig.rejectedRings.forEach((ring) => {
+        (ring.material as THREE.MeshBasicMaterial).opacity = 0.45;
       });
     }
 
@@ -950,12 +1071,12 @@ export function JuryCourtroomCGI({
       camera.updateMatrixWorld();
 
       const p = headAnchors.phase;
-      const showScout = p === 'scout' || p === 'submit';
+      const showScout = p === 'batch_submit' || p === 'select';
       const showLawyers = p === 'argue';
       const showJury = p === 'gavel';
 
       const scoutScreen = projectWorldToScreen(headAnchors.scout, vw, vh);
-      applyBubblePosition(scoutBubbleRef.current, showScout && scoutScreen.visible, scoutScreen.x, scoutScreen.y, vw, vh, 155, 165);
+      applyBubblePosition(scoutBubbleRef.current, showScout && scoutScreen.visible, scoutScreen.x, scoutScreen.y, vw, vh, 160, 192);
 
       const propScreen = projectWorldToScreen(headAnchors.proponent, vw, vh);
       const oppScreen = projectWorldToScreen(headAnchors.opponent, vw, vh);
@@ -976,11 +1097,11 @@ export function JuryCourtroomCGI({
         }
       }
 
-      applyBubblePosition(proponentBubbleRef.current, showLawyers && propScreen.visible, propX, propScreen.y, vw, vh, 165, 165);
-      applyBubblePosition(opponentBubbleRef.current, showLawyers && oppScreen.visible, oppX, oppScreen.y, vw, vh, 165, 165);
+      applyBubblePosition(proponentBubbleRef.current, showLawyers && propScreen.visible, propX, propScreen.y, vw, vh, 165, 192);
+      applyBubblePosition(opponentBubbleRef.current, showLawyers && oppScreen.visible, oppX, oppScreen.y, vw, vh, 165, 192);
 
       const juryScreen = projectWorldToScreen(headAnchors.jury, vw, vh);
-      applyBubblePosition(juryBubbleRef.current, showJury && juryScreen.visible, juryScreen.x, juryScreen.y, vw, vh, 175, 155);
+      applyBubblePosition(juryBubbleRef.current, showJury && juryScreen.visible, juryScreen.x, juryScreen.y, vw, vh, 180, 192);
     }
 
     function afterDraw(cb: () => void) {
@@ -1010,7 +1131,7 @@ export function JuryCourtroomCGI({
       const delta = Math.min(0.1, (now - lastNow) / 1000);
       lastNow = now;
 
-      const fullDuration = Math.max(1, simRef.current.totalCases) * CASE_DURATION + CELEBRATION_DURATION;
+      const fullDuration = BATCH_DURATION + Math.max(1, simRef.current.totalCases) * CASE_DURATION + CELEBRATION_DURATION;
       if (simRef.current.playing) {
         simRef.current.time = Math.min(fullDuration, simRef.current.time + delta * simRef.current.speed);
       }
@@ -1045,6 +1166,7 @@ export function JuryCourtroomCGI({
 
   const currentItem = topCases[activeCaseIdx] || topCases[0] || null;
   const currentJob = currentItem?.job || null;
+  const currentIsRejected = isCaseRejected(currentItem || undefined);
   const currentDept = useMemo(() => (currentJob ? classifyJobDepartment(currentJob) : null), [currentJob]);
   const dialogue = useMemo(() => {
     if (!currentItem || !currentDept) return null;
@@ -1060,11 +1182,11 @@ export function JuryCourtroomCGI({
 
     unlockCourtAudio();
 
-    if (phase === 'scout') {
+    if (phase === 'batch_submit') {
       playScoutPing();
       speakCourtLine('scout', dialogue.scoutDiscoverLine, speed);
-    } else if (phase === 'submit') {
-      speakCourtLine('scout', dialogue.scoutSubmitLine, speed);
+    } else if (phase === 'select') {
+      speakCourtLine('proponent', dialogue.scoutSubmitLine, speed);
     } else if (phase === 'argue') {
       if (speakerTurn === 'proponent') {
         playCounselCue(false);
@@ -1123,12 +1245,16 @@ export function JuryCourtroomCGI({
               <div className={`flex items-center justify-between gap-2 text-[11px] font-semibold ${currentDept.cssBadgeText}`}>
                 <span className="inline-flex items-center gap-1.5 truncate">
                   {soundEnabled && playing && <Volume2 className="w-3 h-3 shrink-0" aria-hidden="true" />}
-                  <span className="truncate">{currentDept.scoutTitle} · {currentJob.source}</span>
+                  <span className="truncate">
+                    {phase === 'batch_submit'
+                      ? `All 4 Scouts · Batch Drop (${totalCases} Jobs)`
+                      : `Counsel Desk Intake · ${currentDept.scoutTitle}`}
+                  </span>
                 </span>
                 <span className="font-mono text-slate-300 shrink-0">{currentDept.shortLabel}</span>
               </div>
               <p className="text-xs text-slate-100 mt-1 leading-snug">
-                {phase === 'scout' ? dialogue.scoutDiscoverLine : dialogue.scoutSubmitLine}
+                {phase === 'batch_submit' ? dialogue.scoutDiscoverLine : dialogue.scoutSubmitLine}
               </p>
               <span
                 aria-hidden="true"
@@ -1259,30 +1385,35 @@ export function JuryCourtroomCGI({
       {/* TOP HUD BAR: Compact Job Case Card + Quick Actions + Docket Controls */}
       <div className="relative z-20 pointer-events-none p-3 sm:p-4 flex flex-col lg:flex-row lg:items-start justify-between gap-3">
         {/* Left: Active Case Header & App Workflow Stepper */}
-        <div className="pointer-events-auto bg-slate-950/92 border border-slate-700/80 rounded-xl px-4 py-3 text-white max-w-xl">
+        <div className="pointer-events-auto bg-slate-950/92 border border-slate-700/80 rounded-xl px-4 py-3 text-white max-w-2xl">
           <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400">
             <span>
               Session {sessionId || 'Live'} {sessionDate ? `· ${sessionDate}` : ''}
             </span>
             <span className="font-mono text-amber-400 tabular-nums">
-              Case {activeCaseIdx + 1} of {totalCases} · Gavel strikes: {gavelHitCount}
+              {phase === 'batch_submit' ? `Batch Submit (${totalCases} Jobs)` : `Case ${activeCaseIdx + 1} of ${totalCases}`} · Gavel strikes: {gavelHitCount}
             </span>
           </div>
 
           {currentJob ? (
             <div className="mt-1">
               <div className="flex flex-wrap items-center gap-2 text-xs text-blue-400 font-medium">
+                <span
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide ${
+                    currentIsRejected
+                      ? 'bg-red-500/20 text-red-300 border border-red-500/40'
+                      : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                  }`}
+                >
+                  {currentIsRejected ? 'Rejected Case' : 'Approved Top Pick'}
+                </span>
                 {currentDept && (
-                  <>
-                    <span className={`font-semibold ${currentDept.cssBadgeText}`}>
-                      {currentDept.scoutTitle}
-                    </span>
-                    <span aria-hidden="true">·</span>
-                  </>
+                  <span className={`font-semibold ${currentDept.cssBadgeText}`}>
+                    {currentDept.scoutTitle}
+                  </span>
                 )}
-                <span>Source: {currentJob.source}</span>
                 <span aria-hidden="true">·</span>
-                <span>{currentJob.posted_date || 'Recently posted'}</span>
+                <span>{currentJob.source}</span>
                 <span aria-hidden="true">·</span>
                 <span className="font-mono tabular-nums">{currentJob.jury_score || currentJob.score}/100</span>
               </div>
@@ -1336,13 +1467,13 @@ export function JuryCourtroomCGI({
           )}
 
           {/* 5-Step App Workflow Progress */}
-          <div className="flex items-center gap-1.5 mt-2.5 pt-2 border-t border-slate-800 overflow-x-auto">
+          <div className="flex flex-wrap items-center gap-1.5 mt-2.5 pt-2 border-t border-slate-800">
             {(
               [
-                ['scout', '1. Scouted'],
-                ['submit', '2. Submitted'],
-                ['argue', '3. Lawyers Argue'],
-                ['gavel', '4. Jury Gavel & Verdict'],
+                ['batch_submit', '1. Batch Submit'],
+                ['select', '2. Lawyer Selects'],
+                ['argue', '3. Argue Case'],
+                ['gavel', '4. Jury Gavel'],
               ] as Array<[Exclude<WorkflowPhase, 'celebrate'>, string]>
             ).map(([key, label]) => {
               const active = phase === key && !cycleCompleted;
@@ -1351,7 +1482,7 @@ export function JuryCourtroomCGI({
                   key={key}
                   type="button"
                   onClick={() => jumpToPhaseInCurrentCase(key)}
-                  className={`px-2.5 py-1 text-[11px] font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
+                  className={`px-2 py-1 text-[10.5px] font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
                     active
                       ? 'bg-blue-600 text-white font-semibold'
                       : 'bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-800'
@@ -1362,13 +1493,13 @@ export function JuryCourtroomCGI({
               );
             })}
             <span
-              className={`px-2.5 py-1 text-[11px] font-medium rounded-md whitespace-nowrap shrink-0 ${
+              className={`px-2 py-1 text-[10.5px] font-medium rounded-md whitespace-nowrap shrink-0 ${
                 celebrating || cycleCompleted
                   ? 'bg-emerald-600 text-white font-semibold'
                   : 'bg-slate-900 text-slate-500'
               }`}
             >
-              5. Top 5 Certified
+              5. Batch &amp; Top 5 Sealed
             </span>
           </div>
         </div>
@@ -1459,7 +1590,7 @@ export function JuryCourtroomCGI({
           {dockCollapsed ? (
             <>
               <ChevronUp className="w-3.5 h-3.5" />
-              <span>Show Courtroom Controls &amp; 5 Evaluated Jobs</span>
+              <span>Show Courtroom Controls &amp; Evaluated Jobs</span>
             </>
           ) : (
             <>
@@ -1472,38 +1603,51 @@ export function JuryCourtroomCGI({
         {!dockCollapsed && (
           <div className="w-full bg-slate-950/92 border border-slate-700/80 rounded-xl p-2.5 space-y-2">
             {topCases.length > 0 && (
-              <div className="grid grid-cols-1 sm:grid-cols-5 gap-1.5">
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
                 {topCases.map((item, idx) => {
-                  const isCurrent = idx === activeCaseIdx;
+                  const isCurrent = idx === activeCaseIdx && phase !== 'batch_submit';
                   const isDone = evaluatedMask[idx] || idx < activeCaseIdx;
+                  const rejected = isCaseRejected(item);
                   const dept = classifyJobDepartment(item.job);
                   return (
                     <button
                       key={item.job.id}
                       type="button"
-                      onClick={() => jumpToCase(idx, 'scout')}
-                      className={`text-left px-2.5 py-2 rounded-lg border transition-colors ${
+                      onClick={() => jumpToCase(idx, 'select')}
+                      className={`text-left px-2 py-1 rounded-lg border transition-colors ${
                         isCurrent
-                          ? 'bg-blue-600/25 border-blue-500 text-white'
-                          : 'bg-slate-900/90 border-slate-800 text-slate-300 hover:border-slate-600'
+                          ? rejected
+                            ? 'bg-red-600/25 border-red-500 text-white'
+                            : 'bg-blue-600/25 border-blue-500 text-white'
+                          : rejected
+                            ? 'bg-red-950/35 border-red-900/60 text-slate-300 hover:border-red-500/70'
+                            : 'bg-slate-900/90 border-slate-800 text-slate-300 hover:border-slate-600'
                       }`}
                     >
-                      <div className="flex items-center justify-between gap-1 text-[11px]">
-                        <span className="font-mono font-semibold text-amber-400 tabular-nums">
+                      <div className="flex items-center justify-between gap-1 text-[10.5px]">
+                        <span
+                          className={`font-mono font-semibold tabular-nums ${
+                            rejected ? 'text-red-400' : 'text-amber-400'
+                          }`}
+                        >
                           #{idx + 1} · {item.job.jury_score || item.job.score}
                         </span>
-                        {isDone ? (
-                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                        ) : (
-                          <span className="text-[10px] text-slate-500">
-                            {isCurrent ? 'On Trial' : 'Queued'}
-                          </span>
-                        )}
+                        <span
+                          className={`font-semibold ${
+                            rejected
+                              ? 'text-red-400'
+                              : isDone
+                                ? 'text-emerald-400'
+                                : 'text-slate-400'
+                          }`}
+                        >
+                          {rejected ? 'Rejected' : isDone ? 'Top 5' : isCurrent ? 'On Trial' : 'Queued'}
+                        </span>
                       </div>
-                      <div className="text-xs font-semibold truncate mt-0.5">
+                      <div className="text-[11.5px] font-semibold truncate mt-0.5">
                         {item.job.title}
                       </div>
-                      <div className="flex items-center justify-between gap-1.5 text-[11px] text-slate-400 mt-0.5">
+                      <div className="flex items-center justify-between gap-1.5 text-[10px] text-slate-400 mt-0.5">
                         <span className="truncate">{item.job.company}</span>
                         <span className={`font-medium shrink-0 ${dept.cssBadgeText}`}>
                           {dept.shortLabel}
@@ -1559,7 +1703,7 @@ export function JuryCourtroomCGI({
                   {soundEnabled ? <Volume2 className="w-3.5 h-3.5 text-emerald-400" /> : <VolumeX className="w-3.5 h-3.5 text-slate-400" />}
                 </button>
                 <span className="hidden md:inline text-[11px] text-slate-400 ml-2 tabular-nums">
-                  {Math.round(totalDuration)}s 5-case cycle + applause · Auto-renews on reload &amp; 24h
+                  {Math.round(totalDuration)}s batch ({totalCases} Top &amp; Rejected) + applause · Auto-renews 24h
                 </span>
               </div>
 

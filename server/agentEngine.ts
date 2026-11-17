@@ -7,8 +7,11 @@ import type {
 } from '../src/types.ts';
 
 export const EVENT_WEIGHTS: Record<string, number> = {
-  click: 1.0,
+  click: 1.25,
+  inspect: 1.25,
+  open_link: 1.75,
   view_debate: 1.5,
+  view_drafts: 2.0,
   shortlist: 3.5,
   apply: 6.0,
   dismiss: -3.5,
@@ -28,46 +31,92 @@ export const REJECTION_REASON_LABELS: Record<string, string> = {
 const KNOWN_SKILLS = [
   'Python',
   'C++',
+  'C#',
+  '.NET',
   'C',
   'Java',
   'JavaScript',
   'TypeScript',
   'Flutter',
   'Dart',
+  'React',
+  'Next.js',
+  'Node.js',
+  'Express',
   'Firebase',
+  'Supabase',
   'HTML',
   'CSS',
-  'React',
-  'Node.js',
+  'Tailwind CSS',
   'SQL',
   'SQLite',
+  'PostgreSQL',
+  'MySQL',
+  'MongoDB',
+  'Redis',
+  'REST API',
+  'GraphQL',
   'Embedded Systems',
   'Microcontrollers',
   'Arduino',
+  'STM32',
+  'ESP32',
+  'Raspberry Pi',
   'RTOS',
+  'Firmware',
+  'Robotics',
+  'ROS',
+  'PCB Design',
   'QA',
-  'Testing',
+  'Software Testing',
   'Selenium',
   'Playwright',
+  'Cypress',
+  'Jest',
+  'Pytest',
+  'JUnit',
+  'CI/CD',
   'Linux',
   'Git',
+  'GitHub',
   'Docker',
+  'Kubernetes',
+  'AWS',
+  'Azure',
+  'GCP',
+  'Machine Learning',
+  'Deep Learning',
+  'TensorFlow',
+  'PyTorch',
+  'OpenCV',
+  'Computer Vision',
   'Graphic Design',
   'Figma',
   'UI/UX',
+  'Adobe Photoshop',
+  'Illustrator',
+  'Canva',
   'MATLAB',
+  'Simulink',
   'Verilog',
+  'VHDL',
   'FPGA',
+  'AutoCAD',
+  'SolidWorks',
+  'Agile',
+  'Scrum',
+  'Networking',
+  'Cybersecurity',
 ];
 
 const ROLE_PATTERNS: Array<{ role: string; keywords: string[] }> = [
-  { role: 'Junior Embedded Systems Engineer', keywords: ['embedded', 'microcontroller', 'arduino', 'rtos', 'fpga', 'verilog', 'c++', 'firmware'] },
-  { role: 'Junior Software Engineer', keywords: ['python', 'java', 'javascript', 'typescript', 'git', 'software', 'react'] },
-  { role: 'QA Engineer', keywords: ['qa', 'testing', 'selenium', 'playwright', 'quality'] },
-  { role: 'Graduate Engineer', keywords: ['engineering', 'b.e.', 'graduate', 'computer systems'] },
-  { role: 'IT Support Engineer', keywords: ['linux', 'support', 'troubleshooting', 'network', 'hardware'] },
-  { role: 'Flutter / Mobile Developer', keywords: ['flutter', 'dart', 'firebase', 'mobile'] },
-  { role: 'UI/UX & Graphic Designer', keywords: ['figma', 'ui/ux', 'graphic design', 'css', 'html'] },
+  { role: 'Junior Embedded Systems Engineer', keywords: ['embedded', 'microcontroller', 'arduino', 'stm32', 'esp32', 'rtos', 'fpga', 'verilog', 'vhdl', 'firmware', 'robotics'] },
+  { role: 'Junior Software Engineer', keywords: ['python', 'java', 'javascript', 'typescript', 'react', 'node.js', 'git', 'software', 'next.js'] },
+  { role: 'QA Engineer', keywords: ['qa', 'software testing', 'selenium', 'playwright', 'cypress', 'pytest', 'junit', 'quality assurance'] },
+  { role: 'Graduate Engineer', keywords: ['engineering', 'b.e.', 'b.s.', 'bachelor', 'graduate', 'computer systems', 'computer science'] },
+  { role: 'IT Support & Cloud Engineer', keywords: ['linux', 'aws', 'azure', 'docker', 'kubernetes', 'troubleshooting', 'networking', 'hardware'] },
+  { role: 'Flutter / Mobile Developer', keywords: ['flutter', 'dart', 'firebase', 'mobile', 'android', 'ios'] },
+  { role: 'UI/UX & Graphic Designer', keywords: ['figma', 'ui/ux', 'graphic design', 'adobe photoshop', 'illustrator', 'canva', 'tailwind css'] },
 ];
 
 const STOP_WORDS = new Set([
@@ -76,6 +125,204 @@ const STOP_WORDS = new Set([
   'about', 'also', 'into', 'more', 'their', 'what', 'which', 'who', 'whom', 'not', 'very',
   'experience', 'years', 'year', 'candidate', 'candidates', 'ability', 'application',
 ]);
+
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export function hasSkillMatch(text: string, skill: string): boolean {
+  const token = (skill || '').trim();
+  if (!token) return false;
+  const escaped = escapeRegex(token);
+  const rx = new RegExp(`(?<![a-z0-9+#.])${escaped}(?![a-z0-9+#.])`, 'i');
+  return rx.test(text);
+}
+
+export interface ParsedCvContent {
+  detectedName: string;
+  detectedLocation: string;
+  detectedDegree: string;
+  summary: string;
+  extractedSkills: string[];
+  education: string;
+  experience: string;
+}
+
+export function sanitizeCvText(raw: string): string {
+  if (!raw) return '';
+  let text = raw
+    .replace(/\uFB00/g, 'ff')
+    .replace(/\uFB01/g, 'fi')
+    .replace(/\uFB02/g, 'fl')
+    .replace(/\uFB03/g, 'ffi')
+    .replace(/\uFB04/g, 'ffl')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2013\u2014]/g, '-')
+    .replace(/\u00A0/g, ' ')
+    // Strip ASCII control chars, replacement chars, and private-use glyph codes
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F\uFFFD\uE000-\uF8FF]/g, ' ');
+
+  const cleanedLines: string[] = [];
+  for (const lineRaw of text.split(/\r?\n/)) {
+    let line = lineRaw.replace(/\s+/g, ' ').trim();
+    if (!line) {
+      if (cleanedLines.length && cleanedLines[cleanedLines.length - 1] !== '') {
+        cleanedLines.push('');
+      }
+      continue;
+    }
+
+    // Re-collapse spaced uppercase letters e.g. "W O R K   E X P E R I E N C E"
+    if (/^(?:[A-Z]\s+){3,}[A-Z]$/.test(line)) {
+      line = line.replace(/\s+/g, '');
+    }
+
+    // Drop internal PDF operator noise lines
+    if (
+      /^(%PDF-|xref|trailer|startxref|endobj|endstream|obj\b|<<|>>|\/Type\b|\/Font\b|\/FlateDecode|CIDInit|begincmap|endcmap|beginbfchar|beginbfrange)/i.test(
+        line
+      )
+    ) {
+      continue;
+    }
+
+    // Check readable character density to eliminate garbled glyph runs
+    const safeChars = (line.match(/[a-zA-Z0-9\s.,;:'"()\-–—/&+#@%*•·!?[\]]/g) || []).length;
+    const alphaWords = (line.match(/[a-zA-Z]{2,}/g) || []).length;
+    const ratio = safeChars / Math.max(1, line.length);
+    const hasWeirdNoise = /[\u00C0-\u024F]{3,}|[^\x20-\x7E•·–—’“”°±™®©]{3,}/.test(line);
+
+    if (ratio < 0.72 || alphaWords === 0 || (hasWeirdNoise && alphaWords < 3)) {
+      continue;
+    }
+
+    cleanedLines.push(line);
+  }
+
+  return cleanedLines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+export function parseCvSections(cvText: string): ParsedCvContent {
+  const cleaned = sanitizeCvText(cvText || '');
+  const rawLines = cleaned
+    .split(/\r?\n/)
+    .map((l) => l.trimEnd());
+
+  const buckets: Record<'header' | 'summary' | 'skills' | 'education' | 'experience', string[]> = {
+    header: [],
+    summary: [],
+    skills: [],
+    education: [],
+    experience: [],
+  };
+
+  let currentSection: keyof typeof buckets = 'header';
+  const headingRx = {
+    summary: /^(professional\s+summary|executive\s+summary|career\s+summary|summary|profile|objective|about(\s+me)?)\s*:?$/i,
+    skills: /^(core\s+skills(\s*&\s*competencies)?|technical\s+skills|skills(\s*&\s*(tools|technologies))?|competencies|tech\s+stack|technologies|tools)\s*:?$/i,
+    education: /^(education|academic\s+background|academic\s+qualifications|qualifications|degrees?)\s*:?$/i,
+    experience: /^(experience(\s*&\s*projects)?|work\s+experience|professional\s+experience|relevant\s+experience|engineering\s+experience|work\s+history|career\s+history|employment|internships?(\s*&\s*projects)?|projects|academic\s+projects|technical\s+projects|selected\s+projects|personal\s+projects|key\s+projects|project\s+portfolio|certifications?|achievements?|leadership(\s*&\s*activities)?)\s*:?$/i,
+  };
+
+  for (const line of rawLines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      if (currentSection !== 'header') {
+        buckets[currentSection].push('');
+      }
+      continue;
+    }
+
+    const cleanHeading = trimmed.replace(/^#+\s*/, '').replace(/[:\-–—]+$/, '').trim();
+    if (headingRx.summary.test(cleanHeading)) {
+      currentSection = 'summary';
+      continue;
+    }
+    if (headingRx.skills.test(cleanHeading)) {
+      currentSection = 'skills';
+      continue;
+    }
+    if (headingRx.education.test(cleanHeading)) {
+      currentSection = 'education';
+      continue;
+    }
+    if (headingRx.experience.test(cleanHeading)) {
+      currentSection = 'experience';
+      continue;
+    }
+
+    // Inline labeled line like "Skills: Python, C++, Embedded Systems"
+    const inlineSkillMatch = trimmed.match(/^(?:technical\s+)?skills\s*:\s*(.+)$/i);
+    if (inlineSkillMatch) {
+      buckets.skills.push(inlineSkillMatch[1]);
+      continue;
+    }
+    const inlineEduMatch = trimmed.match(/^education\s*:\s*(.+)$/i);
+    if (inlineEduMatch) {
+      buckets.education.push(inlineEduMatch[1]);
+      continue;
+    }
+
+    buckets[currentSection].push(trimmed);
+  }
+
+  // Known skills with word-boundary accuracy
+  const knownDetected = KNOWN_SKILLS.filter((skill) => hasSkillMatch(cvText, skill));
+
+  // Explicit items listed in user's Skills section (so custom words aren't dropped!)
+  const explicitSkillTokens = buckets.skills
+    .join('\n')
+    .split(/[\n,|•;·/]+/)
+    .map((s) => s.replace(/^[•\-*]\s*/, '').replace(/^[\w\s]+:\s*/, '').trim())
+    .filter((s) => s.length >= 2 && s.length <= 36 && !/^(and|or|with|including|etc\.?)$/i.test(s));
+
+  const seenSkillKeys = new Set<string>();
+  const extractedSkills: string[] = [];
+  for (const s of [...knownDetected, ...explicitSkillTokens]) {
+    const k = s.toLowerCase();
+    if (!seenSkillKeys.has(k)) {
+      seenSkillKeys.add(k);
+      extractedSkills.push(s);
+    }
+  }
+
+  // Detect name from header line if it looks like a person name (2-4 words, not an email/URL/phone)
+  const headerClean = buckets.header.filter(Boolean);
+  let detectedName = '';
+  if (
+    headerClean[0] &&
+    headerClean[0].length <= 48 &&
+    !/[@/\\|]|\d{3}/.test(headerClean[0]) &&
+    headerClean[0].split(/\s+/).length >= 2 &&
+    headerClean[0].split(/\s+/).length <= 5
+  ) {
+    detectedName = headerClean[0];
+  }
+
+  const detectedDegree =
+    buckets.education.find((l) => l.trim().length > 4) ||
+    rawLines.find((l) => /\b(b\.?e\.?|b\.?s\.?|b\.?tech|m\.?s\.?|bachelor|master|university|institute|college)\b/i.test(l))?.trim() ||
+    '';
+
+  const detectedLocation =
+    headerClean.find((l) => /,/.test(l) && !/@/.test(l) && l !== detectedName)?.split('|')[0]?.trim() || '';
+
+  const fallbackExp =
+    !buckets.experience.length && !buckets.summary.length && headerClean.length > 2
+      ? headerClean.slice(2).join('\n')
+      : '';
+
+  return {
+    detectedName,
+    detectedLocation,
+    detectedDegree,
+    summary: buckets.summary.join('\n').trim(),
+    extractedSkills: extractedSkills.slice(0, 24),
+    education: buckets.education.join('\n').trim(),
+    experience: (buckets.experience.join('\n').trim() || fallbackExp).trim(),
+  };
+}
 
 export function googleCareersSearchUrl(profile: Partial<CandidateProfile>): string {
   const roles = (profile.target_roles || '')
@@ -97,20 +344,15 @@ export function googleCareersSearchUrl(profile: Partial<CandidateProfile>): stri
 }
 
 export function analyzeCv(cvText: string): CvAnalysis {
-  const lower = (cvText || '').toLowerCase();
-  const skills = KNOWN_SKILLS.filter((skill) => {
-    const token = skill.toLowerCase();
-    if (token === 'c') return /\bc\b/.test(lower);
-    if (token === 'c++') return lower.includes('c++');
-    return lower.includes(token);
-  });
+  const parsed = parseCvSections(cvText || '');
+  const skills = parsed.extractedSkills;
 
   const roles = ROLE_PATTERNS.filter((entry) =>
-    entry.keywords.some((kw) => lower.includes(kw))
+    entry.keywords.some((kw) => hasSkillMatch(cvText || '', kw))
   ).map((entry) => entry.role);
 
   const summary = skills.length
-    ? `Extracted ${skills.length} technical skills and recommended ${roles.length || 1} entry-level engineering tracks.`
+    ? `Extracted ${skills.length} skills/keywords (${skills.slice(0, 5).join(', ')}${skills.length > 5 ? ', …' : ''}) across ${roles.length || 1} engineering tracks.`
     : 'Add CV details or upload a resume to detect skills and role tracks.';
 
   return {
@@ -124,34 +366,38 @@ export function scoreCvMatch(
   profile: Partial<CandidateProfile>,
   job: Partial<JobItem>
 ): { score: number; matchedSkills: string[]; matchedRoles: string[] } {
-  const hay = `${job.title || ''} ${job.description || ''}`.toLowerCase();
+  const hay = `${job.title || ''} ${job.description || ''}`;
   const profileSkills = (profile.skills || '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
+  const cvParsed = profile.cv_text ? parseCvSections(profile.cv_text) : null;
+  const combinedSkillPool = Array.from(
+    new Map(
+      [...profileSkills, ...(cvParsed?.extractedSkills || [])].map((s) => [s.toLowerCase(), s])
+    ).values()
+  );
+
   const targetRoles = (profile.target_roles || '')
     .split(',')
     .map((r) => r.trim())
     .filter(Boolean);
 
-  const matchedSkills = profileSkills.filter((skill) => {
-    const s = skill.toLowerCase();
-    if (s === 'c') return /\bc\b/.test(hay);
-    return hay.includes(s);
-  });
+  const matchedSkills = combinedSkillPool.filter((skill) => hasSkillMatch(hay, skill));
 
+  const hayLower = hay.toLowerCase();
   const matchedRoles = targetRoles.filter((role) => {
     const tokens = role
       .toLowerCase()
       .split(/\s+/)
       .filter((t) => t.length > 2 && !['junior', 'graduate', 'engineer'].includes(t));
-    return tokens.some((t) => hay.includes(t));
+    return tokens.some((t) => hayLower.includes(t));
   });
 
   let score = 28;
   score += Math.min(44, matchedSkills.length * 14);
   score += Math.min(20, matchedRoles.length * 10);
-  if (hay.includes('junior') || hay.includes('graduate') || hay.includes('entry') || hay.includes('intern')) {
+  if (/\b(junior|graduate|entry|intern|trainee)\b/i.test(hay)) {
     score += 8;
   }
   return {
@@ -312,31 +558,42 @@ export function generateApplicationMaterials(
 ): { tailored_cv: string; cover_letter: string } {
   const jobTitle = (job.title || 'the advertised role').trim();
   const company = (job.company || 'Hiring Organization').trim();
-  const name = (profile.name || 'Candidate Name').trim();
-  const residence = (profile.residence || 'Available for Relocation').trim();
-  const degree = (profile.degree || '').trim();
   const cvText = (profile.cv_text || '').trim();
+  const parsedCv = parseCvSections(cvText);
+
+  const name = (profile.name || parsedCv.detectedName || 'Candidate Name').trim();
+  const residence = (profile.residence || parsedCv.detectedLocation || 'Available for Relocation').trim();
+  const degree = (profile.degree || parsedCv.detectedDegree || '').trim();
 
   const match = scoreCvMatch(profile, job);
   const profileSkills = (profile.skills || '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
-  const relevantSkills = Array.from(
-    new Set([...match.matchedSkills, ...profileSkills])
-  ).slice(0, 12);
+
+  const mergedSkills = Array.from(
+    new Map(
+      [...match.matchedSkills, ...parsedCv.extractedSkills, ...profileSkills].map((s) => [s.toLowerCase(), s])
+    ).values()
+  );
+  const relevantSkills = mergedSkills.slice(0, 14);
 
   const summaryParts: string[] = [];
-  if (degree) {
-    summaryParts.push(`${degree} graduate`);
+  if (parsedCv.summary) {
+    summaryParts.push(parsedCv.summary);
+    summaryParts.push(`Tailored specifically for ${jobTitle} at ${company}.`);
   } else {
-    summaryParts.push('Engineering candidate');
-  }
-  summaryParts.push(`targeting the ${jobTitle} opportunity at ${company}.`);
-  if (relevantSkills.length) {
-    summaryParts.push(
-      `Core technical strengths include ${relevantSkills.slice(0, 6).join(', ')}.`
-    );
+    if (degree) {
+      summaryParts.push(`${degree} graduate`);
+    } else {
+      summaryParts.push('Engineering candidate');
+    }
+    summaryParts.push(`targeting the ${jobTitle} opportunity at ${company}.`);
+    if (relevantSkills.length) {
+      summaryParts.push(
+        `Core technical strengths include ${relevantSkills.slice(0, 6).join(', ')}.`
+      );
+    }
   }
 
   const resumeSections: string[] = [
@@ -355,17 +612,19 @@ export function generateApplicationMaterials(
     );
   }
 
-  if (degree) {
-    resumeSections.push('', 'EDUCATION', degree);
+  const educationBlock = parsedCv.education || degree;
+  if (educationBlock) {
+    resumeSections.push('', 'EDUCATION', educationBlock);
   }
 
-  const formattedCvLines = cvText
-    ? cvText
+  const experienceSource = parsedCv.experience || '';
+  const formattedCvLines = experienceSource
+    ? experienceSource
         .split(/\r?\n/)
         .map((line) => line.trim())
-        .filter(Boolean)
+        .filter((line) => Boolean(line) && /[a-zA-Z]{2,}/.test(line))
         .map((line) => (line.startsWith('-') ? `• ${line.slice(1).trim()}` : line))
-    : ['• Add academic projects, internships, or work experience in your Profile to populate this section.'];
+    : ['• Add your work history, internships, or engineering projects using the Structured Experience & Projects editor below.'];
 
   resumeSections.push('', 'EXPERIENCE & PROJECTS', ...formattedCvLines);
 
@@ -376,7 +635,7 @@ export function generateApplicationMaterials(
     month: 'long',
     day: 'numeric',
   });
-  const skillPhrase = (match.matchedSkills.length ? match.matchedSkills : relevantSkills.slice(0, 4)).join(', ');
+  const skillPhrase = (match.matchedSkills.length ? match.matchedSkills : relevantSkills.slice(0, 5)).join(', ');
   const fitParagraph = skillPhrase
     ? `Through my academic training and hands-on engineering work, I have built practical depth in ${skillPhrase}, which aligns closely with the technical requirements outlined for this role.`
     : 'I am enthusiastic about the responsibilities outlined in your posting and look forward to contributing dependable engineering execution from day one.';
@@ -505,7 +764,7 @@ export function runJuryDeliberation(
   const sessionId = `${today.replace(/-/g, '')}_${nowIso.slice(11, 19).replace(/:/g, '')}_${Math.random().toString(16).slice(2, 8)}`;
 
   const jobs = db
-    .prepare("SELECT * FROM jobs WHERE status != 'dismissed'")
+    .prepare('SELECT * FROM jobs')
     .all() as unknown as JobItem[];
 
   const excludedSkills = (profile.excluded_skills || '')
@@ -552,12 +811,13 @@ export function runJuryDeliberation(
     const titleLower = (job.title || '').toLowerCase();
     const descLower = (job.description || '').toLowerCase();
     const hay = `${titleLower} ${descLower}`;
+    const isDismissed = job.status === 'dismissed';
 
     const cvMatch = scoreCvMatch(profile, job);
     const { boost, reasons } = computeLearnedBoost(db, job);
 
     const isSenior = /\b(senior|staff|principal|lead|director|architect|manager|head of)\b/.test(titleLower);
-    const hasExcludedSkill = excludedSkills.some((s) => hay.includes(s));
+    const hasExcludedSkill = excludedSkills.some((s) => hasSkillMatch(hay, s));
     const hasExcludedTerm = excludedTerms.some((t) => titleLower.includes(t));
     const isSaudiOnly = hay.includes('saudi national') || hay.includes('saudization');
 
@@ -585,9 +845,10 @@ export function runJuryDeliberation(
 
     let rawScore = Math.round(cvMatch.score * 0.65 + (isLive ? 15 : 0) + (visaMentioned ? 10 : 4) + (inPreferredCity ? 12 : isRemote ? 8 : 0) + boost);
     if (!constraintPass) rawScore = Math.max(15, rawScore - 28);
+    if (isDismissed) rawScore = Math.max(10, rawScore - 18);
     const finalScore = Math.max(10, Math.min(98, rawScore));
 
-    const eligibleForDaily = isLive && constraintPass && job.authenticity_status !== 'suspicious';
+    const eligibleForDaily = !isDismissed && isLive && constraintPass && job.authenticity_status !== 'suspicious';
     const advocate =
       cvMatch.matchedSkills.length >= 2
         ? 'Software & Systems Agent'
@@ -595,19 +856,25 @@ export function runJuryDeliberation(
           ? 'Visa & Relocation Advocate'
           : 'Quality & Operations Agent';
 
-    const verdict = !isLive
-      ? 'DEFERRED BY JURY (AVAILABILITY UNVERIFIED)'
-      : !constraintPass
-        ? 'CONSTRAINED BY PROFILE PREFERENCES'
-        : finalScore >= 55
-          ? 'APPROVED BY MAJORITY VOTE'
-          : 'TOP CANDIDATE — REVIEW MATCH DETAILS';
+    const verdict = isDismissed
+      ? 'REJECTED BY CANDIDATE & JURY BENCH'
+      : !isLive
+        ? 'REJECTED — LINK UNAVAILABLE / UNVERIFIED'
+        : !constraintPass
+          ? 'REJECTED — CONSTRAINED BY PROFILE PREFERENCES'
+          : finalScore >= 55
+            ? 'APPROVED BY MAJORITY VOTE'
+            : 'TOP CANDIDATE — REVIEW MATCH DETAILS';
 
-    const recommendation = !isLive
-      ? 'Posting reachability could not be confirmed today. Verify directly on the employer site before investing time.'
-      : visaMentioned
-        ? 'Strong alignment with visa/mobility signals present. Prioritize for shortlist and tailored application.'
-        : 'Suitable for your active pipeline. Confirm visa/relocation support during initial recruiter outreach.';
+    const recommendation = isDismissed
+      ? 'Previously rejected/dismissed in your pipeline; kept in Jury memory as a negative training example.'
+      : !constraintPass
+        ? 'Eliminated during cross-examination because it violates your seniority, skill, or role-track exclusions.'
+        : !isLive
+          ? 'Posting reachability could not be confirmed today. Excluded from the top 5.'
+          : visaMentioned
+            ? 'Strong alignment with visa/mobility signals present. Prioritize for shortlist and tailored application.'
+            : 'Suitable for your active pipeline. Confirm visa/relocation support during initial recruiter outreach.';
 
     const args = [
       {
@@ -640,8 +907,8 @@ export function runJuryDeliberation(
         agent_name: 'Candidate Experience Fit Examiner',
         agent_role: 'Seniority, Skills & Role Preference Review',
         argument_type: 'candidate_constraints',
-        statement: constraintNote,
-        score: constraintPass ? 100 : 25,
+        statement: isDismissed ? `REJECTED: Previously dismissed by candidate; ${constraintNote}` : constraintNote,
+        score: !isDismissed && constraintPass ? 100 : 20,
       },
       {
         agent_name: 'Visa & Relocation Advocate',
@@ -698,7 +965,15 @@ export function runJuryDeliberation(
       .map((e) => e.job.id)
   );
 
-  const summary = `Supreme Jury convened across ${evaluated.length} active vacancies. Crowned ${crownedIds.size} reachable openings matching ${profile.name}'s profile and learned behavioral weights.`;
+  // Persist rich transcripts for top 35 approved/active + up to 20 rejected/dismissed/constrained roles
+  const rejectedToPersist = new Set(
+    evaluated
+      .filter((e) => !e.eligibleForDaily)
+      .slice(0, 20)
+      .map((e) => e.job.id)
+  );
+
+  const summary = `Supreme Jury convened across ${evaluated.length} active & rejected vacancies. Crowned ${crownedIds.size} reachable openings matching ${profile.name}'s profile.`;
 
   db.exec('BEGIN');
   try {
@@ -709,7 +984,8 @@ export function runJuryDeliberation(
 
     db.prepare('UPDATE jobs SET is_daily_pick = 0').run();
 
-    for (const item of evaluated) {
+    for (let idx = 0; idx < evaluated.length; idx++) {
+      const item = evaluated[idx];
       const isPick = crownedIds.has(item.job.id) ? 1 : 0;
       const finalVerdict = isPick && item.finalScore < 55 ? 'TOP 5 PICK — LOWER MATCH CONFIDENCE' : item.verdict;
       updateJobStmt.run(
@@ -721,8 +997,7 @@ export function runJuryDeliberation(
         item.job.id
       );
 
-      // Persist arguments & verdicts for top 40 jobs to keep DB fast and rich
-      if (isPick || evaluated.indexOf(item) < 40) {
+      if (isPick || idx < 35 || rejectedToPersist.has(item.job.id)) {
         for (const arg of item.args) {
           insertArgStmt.run(
             sessionId,
@@ -759,3 +1034,97 @@ export function runJuryDeliberation(
     reviewedCount: evaluated.length,
   };
 }
+
+/**
+ * Fast real-time Jury recalibration executed after every user click, shortlist, apply, or dislike
+ * so Today's Top Picks and match scores reflect learned user preferences immediately.
+ */
+export function recalibrateScoresFromWeights(
+  db: DatabaseSync,
+  profile: CandidateProfile
+): { updatedCount: number; dailyPicksCount: number } {
+  const jobs = db.prepare('SELECT * FROM jobs').all() as unknown as JobItem[];
+  const excludedSkills = (profile.excluded_skills || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  const excludedTerms = (profile.excluded_job_terms || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  const preferredCity = (profile.residence || '').split(',')[0].trim().toLowerCase();
+
+  const weightsRows = db
+    .prepare('SELECT feature_type, feature_value, score_delta FROM learned_weights')
+    .all() as Array<{ feature_type: string; feature_value: string; score_delta: number }>;
+  const weightMap = new Map<string, number>();
+  for (const row of weightsRows) {
+    weightMap.set(`${row.feature_type}::${row.feature_value}`, row.score_delta);
+  }
+
+  const scored: Array<{ id: string; finalScore: number; eligible: boolean }> = [];
+  for (const job of jobs) {
+    const titleLower = (job.title || '').toLowerCase();
+    const descLower = (job.description || '').toLowerCase();
+    const hay = `${titleLower} ${descLower}`;
+    const isDismissed = job.status === 'dismissed';
+    const cvMatch = scoreCvMatch(profile, job);
+
+    let boostRaw = 0;
+    for (const [ftype, fval] of extractJobFeatures(job)) {
+      const delta = weightMap.get(`${ftype}::${fval}`);
+      if (delta && Math.abs(delta) >= 0.5) boostRaw += delta;
+    }
+    const boost = Math.max(-25, Math.min(25, Math.round(boostRaw)));
+
+    const isSenior = /\b(senior|staff|principal|lead|director|architect|manager|head of)\b/.test(titleLower);
+    const hasExcludedSkill = excludedSkills.some((s) => hasSkillMatch(hay, s));
+    const hasExcludedTerm = excludedTerms.some((t) => titleLower.includes(t));
+    const isSaudiOnly = hay.includes('saudi national') || hay.includes('saudization');
+
+    let constraintPass = true;
+    if (profile.experience_level === 'entry-level' && isSenior) constraintPass = false;
+    else if (hasExcludedSkill || hasExcludedTerm || isSaudiOnly) constraintPass = false;
+
+    const inPreferredCity = Boolean(preferredCity && (job.location || '').toLowerCase().includes(preferredCity));
+    const isRemote = (job.location || '').toLowerCase().includes('remote');
+    const visaMentioned = (job.visa_evidence || '').toLowerCase().includes('mentioned');
+    const isLive = job.liveness_status === 'live';
+
+    let rawScore = Math.round(
+      cvMatch.score * 0.65 +
+        (isLive ? 15 : 0) +
+        (visaMentioned ? 10 : 4) +
+        (inPreferredCity ? 12 : isRemote ? 8 : 0) +
+        boost
+    );
+    if (!constraintPass) rawScore = Math.max(15, rawScore - 28);
+    if (isDismissed) rawScore = Math.max(10, rawScore - 18);
+    const finalScore = Math.max(10, Math.min(98, rawScore));
+
+    const eligible = !isDismissed && isLive && constraintPass && job.authenticity_status !== 'suspicious';
+    scored.push({ id: job.id, finalScore, eligible });
+  }
+
+  scored.sort((a, b) => {
+    if (a.eligible !== b.eligible) return a.eligible ? -1 : 1;
+    return b.finalScore - a.finalScore;
+  });
+
+  const pickIds = new Set(scored.filter((s) => s.eligible).slice(0, 5).map((s) => s.id));
+  const updateStmt = db.prepare('UPDATE jobs SET jury_score=?, score=?, is_daily_pick=? WHERE id=?');
+
+  db.exec('BEGIN');
+  try {
+    for (const s of scored) {
+      updateStmt.run(s.finalScore, s.finalScore, pickIds.has(s.id) ? 1 : 0, s.id);
+    }
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+
+  return { updatedCount: scored.length, dailyPicksCount: pickIds.size };
+}
+

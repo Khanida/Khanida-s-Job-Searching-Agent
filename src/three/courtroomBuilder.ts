@@ -41,7 +41,9 @@ export interface EvaluatedDossier {
   coverMesh: THREE.Mesh;
   glowRing: THREE.Mesh;
   startPos: THREE.Vector3;
+  reviewPos: THREE.Vector3;
   pedestalPos: THREE.Vector3;
+  rejectedPos: THREE.Vector3;
   index: number;
 }
 
@@ -60,6 +62,7 @@ export interface CourtroomRig {
   judges: JudgeActor[];
   evaluatedDossiers: EvaluatedDossier[];
   pedestalRings: THREE.Mesh[];
+  rejectedRings: THREE.Mesh[];
   scalesBeam: THREE.Group;
   debateBeamA: THREE.Mesh;
   debateBeamB: THREE.Mesh;
@@ -333,19 +336,25 @@ function createScoutWorker(
   head.add(brim);
   group.add(head);
 
-  // Carried Dossier (hidden until Act 1 pickup)
-  const dossierObj = createDossier(accentColor, disposables);
-  dossierObj.group.position.set(0, 0.96, 0.38);
-  dossierObj.group.rotation.x = 0.25;
-  dossierObj.group.visible = false;
-  group.add(dossierObj.group);
+  // Carried Dossier Batch Stack (3 stacked folders when Scouts submit a bunch of jobs at once)
+  const carriedDossier = new THREE.Group();
+  carriedDossier.position.set(0, 0.96, 0.4);
+  carriedDossier.rotation.x = 0.22;
+  for (let s = 0; s < 3; s++) {
+    const stackLayer = createDossier(s === 2 ? accentColor : 0xf59e0b, disposables);
+    stackLayer.group.position.set((s - 1) * 0.02, s * 0.09, 0);
+    stackLayer.group.rotation.y = (s - 1) * 0.08;
+    carriedDossier.add(stackLayer.group);
+  }
+  carriedDossier.visible = false;
+  group.add(carriedDossier);
 
   disposables.push(
     shadowGeo, shadowMat, suitMat, vestMat, skinMat, bootMat,
     legGeo, bootGeo, torsoGeo, vestGeo, armGeo, headGeo, capGeo, brimGeo
   );
 
-  return { group, leftLeg, rightLeg, leftArm, rightArm, head, carriedDossier: dossierObj.group };
+  return { group, leftLeg, rightLeg, leftArm, rightArm, head, carriedDossier };
 }
 
 function createLawyerSubAgent(
@@ -907,22 +916,47 @@ export function buildCourtroomScene(
     };
   });
 
-  // 6. 5 Jury Evaluation Pedestals along the front of the Jury Bar + 5 Dossiers
+  // 6. 5 Approved Jury Pedestals (Front of Jury Bar) + 5 Crimson Rejected Case Rail Pedestals (Right Wing) + 10 Batch Dossiers
   const pedestalGeo = new THREE.CylinderGeometry(0.42, 0.48, 0.95, 24);
   const pedestalTopGeo = new THREE.CylinderGeometry(0.46, 0.46, 0.07, 24);
   const ringGeo = new THREE.RingGeometry(0.48, 0.56, 32);
+  const crimsonMat = new THREE.MeshStandardMaterial({ color: 0x7f1d1d, roughness: 0.35, metalness: 0.45 });
+
+  // Central Lawyer Case Examination Lectern (where selected single job sits during argument)
+  const lecternPed = new THREE.Mesh(pedestalGeo, darkMetalMat);
+  lecternPed.position.set(0, 0.475, 1.05);
+  lecternPed.castShadow = true;
+  scene.add(lecternPed);
+  const lecternTop = new THREE.Mesh(pedestalTopGeo, brassMat);
+  lecternTop.position.set(0, 0.97, 1.05);
+  scene.add(lecternTop);
 
   const evaluatedDossiers: EvaluatedDossier[] = [];
   const pedestalRings: THREE.Mesh[] = [];
+  const rejectedRings: THREE.Mesh[] = [];
   const evalX = [-3.2, -1.6, 0, 1.6, 3.2];
-  const startDesks = [
-    new THREE.Vector3(-3.2, 0.88, 2.3),
-    new THREE.Vector3(-2.7, 0.88, 2.4),
-    new THREE.Vector3(0.2, 0.88, 3.2),
-    new THREE.Vector3(3.2, 0.88, 2.4),
-    new THREE.Vector3(3.7, 0.88, 2.3),
+  const rejCoords: Array<[number, number]> = [
+    [5.1, -1.7],
+    [5.8, -0.7],
+    [6.1, 0.4],
+    [5.7, 1.5],
+    [5.0, 2.5],
   ];
 
+  const startDesks = [
+    new THREE.Vector3(-3.6, 0.89, 2.2),
+    new THREE.Vector3(-3.0, 0.91, 2.35),
+    new THREE.Vector3(-2.5, 0.89, 2.15),
+    new THREE.Vector3(-0.3, 0.89, 3.15),
+    new THREE.Vector3(0.25, 0.91, 3.25),
+    new THREE.Vector3(0.75, 0.89, 3.12),
+    new THREE.Vector3(3.15, 0.89, 2.15),
+    new THREE.Vector3(3.65, 0.91, 2.32),
+    new THREE.Vector3(4.1, 0.89, 2.18),
+    new THREE.Vector3(-0.1, 0.95, 3.22),
+  ];
+
+  // Build 5 Approved Golden/Emerald Jury Pedestals
   evalX.forEach((px, idx) => {
     const pz = -2.15;
     const ped = new THREE.Mesh(pedestalGeo, darkMetalMat);
@@ -938,7 +972,7 @@ export function buildCourtroomScene(
     const ringMat = new THREE.MeshBasicMaterial({
       color: 0x10b981,
       transparent: true,
-      opacity: 0.15,
+      opacity: 0.14,
       side: THREE.DoubleSide,
       depthWrite: false,
     });
@@ -949,8 +983,40 @@ export function buildCourtroomScene(
     scene.add(ring);
     pedestalRings.push(ring);
     disposables.push(ringMat);
+  });
 
-    const dossier = createDossier(idx === 0 ? 0xf59e0b : 0x2563eb, disposables);
+  // Build 5 Crimson Rejected Case Rail Pedestals
+  rejCoords.forEach(([rx, rz]) => {
+    const ped = new THREE.Mesh(pedestalGeo, darkMetalMat);
+    ped.position.set(rx, 0.42, rz);
+    ped.scale.set(0.85, 0.88, 0.85);
+    ped.castShadow = true;
+    scene.add(ped);
+
+    const pedTop = new THREE.Mesh(pedestalTopGeo, crimsonMat);
+    pedTop.position.set(rx, 0.86, rz);
+    pedTop.scale.set(0.85, 1, 0.85);
+    scene.add(pedTop);
+
+    const rejRingMat = new THREE.MeshBasicMaterial({
+      color: 0xef4444,
+      transparent: true,
+      opacity: 0.16,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+    const rejRing = new THREE.Mesh(ringGeo, rejRingMat);
+    rejRing.rotation.x = -Math.PI / 2;
+    rejRing.position.set(rx, 0.9, rz);
+    scene.add(rejRing);
+    rejectedRings.push(rejRing);
+    disposables.push(rejRingMat);
+  });
+
+  // Build 10 Batch Job Dossiers
+  for (let idx = 0; idx < 10; idx++) {
+    const slot5 = idx % 5;
+    const dossier = createDossier(idx % 2 === 0 ? 0x2563eb : 0xf59e0b, disposables);
     dossier.group.position.copy(startDesks[idx]);
     dossier.group.userData = { pickIndex: idx };
     dossier.group.traverse((child) => {
@@ -963,11 +1029,13 @@ export function buildCourtroomScene(
       coverMesh: dossier.coverMesh,
       glowRing: dossier.glowRing,
       startPos: startDesks[idx].clone(),
-      pedestalPos: new THREE.Vector3(px, 1.04, pz),
+      reviewPos: new THREE.Vector3(0, 1.04, 1.05),
+      pedestalPos: new THREE.Vector3(evalX[slot5], 1.04, -2.15),
+      rejectedPos: new THREE.Vector3(rejCoords[slot5][0], 0.93, rejCoords[slot5][1]),
       index: idx,
     });
-  });
-  disposables.push(pedestalGeo, pedestalTopGeo, ringGeo);
+  }
+  disposables.push(pedestalGeo, pedestalTopGeo, ringGeo, crimsonMat);
 
   // 7. Debate Energy Beams & Speaker Spotlight Cone
   const beamGeo = new THREE.CylinderGeometry(0.035, 0.035, 1, 10);
@@ -1053,6 +1121,7 @@ export function buildCourtroomScene(
     judges,
     evaluatedDossiers,
     pedestalRings,
+    rejectedRings,
     scalesBeam,
     debateBeamA,
     debateBeamB,

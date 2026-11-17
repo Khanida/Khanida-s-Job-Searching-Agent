@@ -2,23 +2,10 @@ export type CourtVoiceRole = 'scout' | 'proponent' | 'opponent' | 'examiner' | '
 
 let audioCtx: AudioContext | null = null;
 let noiseBuffer: AudioBuffer | null = null;
-let cachedVoices: SpeechSynthesisVoice[] = [];
-let voiceListenerAttached = false;
-
-function refreshVoices(): void {
-  if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
-  try {
-    cachedVoices = window.speechSynthesis.getVoices();
-    if (!voiceListenerAttached && typeof window.speechSynthesis.addEventListener === 'function') {
-      voiceListenerAttached = true;
-      window.speechSynthesis.addEventListener('voiceschanged', () => {
-        cachedVoices = window.speechSynthesis.getVoices();
-      });
-    }
-  } catch {
-    cachedVoices = [];
-  }
-}
+let speechBusGain: GainNode | null = null;
+let activeSpeechNodes: Array<{ stop?: () => void; disconnect: () => void }> = [];
+let speechGenerationId = 0;
+let autoUnlockAttached = false;
 
 function getAudioContext(): AudioContext | null {
   if (typeof window === 'undefined') return null;
@@ -29,12 +16,35 @@ function getAudioContext(): AudioContext | null {
   if (!audioCtx || audioCtx.state === 'closed') {
     audioCtx = new Ctor();
     noiseBuffer = null;
+    speechBusGain = null;
   }
   return audioCtx;
 }
 
+function getSpeechBus(ctx: AudioContext): GainNode {
+  if (!speechBusGain || speechBusGain.context !== ctx) {
+    speechBusGain = ctx.createGain();
+    speechBusGain.gain.setValueAtTime(1, ctx.currentTime);
+    speechBusGain.connect(ctx.destination);
+  }
+  return speechBusGain;
+}
+
+function attachAutoUnlockListener(): void {
+  if (typeof window === 'undefined' || autoUnlockAttached) return;
+  autoUnlockAttached = true;
+  const resumeIfNeeded = () => {
+    const ctx = getAudioContext();
+    if (ctx && ctx.state === 'suspended') {
+      ctx.resume().catch(() => {});
+    }
+  };
+  window.addEventListener('pointerdown', resumeIfNeeded, { passive: true });
+  window.addEventListener('keydown', resumeIfNeeded, { passive: true });
+}
+
 export function unlockCourtAudio(): void {
-  refreshVoices();
+  attachAutoUnlockListener();
   const ctx = getAudioContext();
   if (ctx && ctx.state === 'suspended') {
     ctx.resume().catch(() => {});
@@ -42,11 +52,34 @@ export function unlockCourtAudio(): void {
 }
 
 export function stopCourtSpeech(): void {
-  if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
-  try {
-    window.speechSynthesis.cancel();
-  } catch {
-    // Ignore restricted speech contexts
+  speechGenerationId += 1;
+
+  if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+    try {
+      window.speechSynthesis.cancel();
+    } catch {
+      // Ignore restricted speech contexts
+    }
+  }
+
+  for (const node of activeSpeechNodes) {
+    try {
+      node.stop?.();
+    } catch {
+      // Node may already be stopped
+    }
+    try {
+      node.disconnect();
+    } catch {
+      // Ignore disconnect issues
+    }
+  }
+  activeSpeechNodes = [];
+
+  if (audioCtx && speechBusGain && audioCtx.state === 'running') {
+    const now = audioCtx.currentTime;
+    speechBusGain.gain.cancelScheduledValues(now);
+    speechBusGain.gain.setValueAtTime(1, now);
   }
 }
 
@@ -56,6 +89,7 @@ export function disposeCourtAudio(): void {
     audioCtx.close().catch(() => {});
   }
   audioCtx = null;
+  speechBusGain = null;
   noiseBuffer = null;
 }
 
@@ -161,7 +195,7 @@ export function playCounselCue(isObjection = false, volume = 0.12): void {
 
 /**
  * Celebratory courtroom applause (staggered hand claps + warm fanfare chime)
- * triggered when all top 5 daily jobs finish Jury evaluation.
+ * triggered when all daily cases finish Jury evaluation.
  */
 export function playCelebrationApplause(volume = 0.42): void {
   const ctx = getAudioContext();
@@ -217,71 +251,266 @@ export function playCelebrationApplause(volume = 0.42): void {
   }
 }
 
-function pickVoiceForRole(voices: SpeechSynthesisVoice[], role: CourtVoiceRole): SpeechSynthesisVoice | null {
-  if (!voices.length) return null;
-  const enVoices = voices.filter((v) => v.lang.toLowerCase().startsWith('en'));
-  const pool = enVoices.length ? enVoices : voices;
-  const byPattern = (re: RegExp) => pool.find((v) => re.test(v.name));
-
-  if (role === 'judge') {
-    return byPattern(/daniel|george|arthur|alex|guy|christopher|david|male/i) || pool[0];
-  }
-  if (role === 'opponent') {
-    return (
-      byPattern(/samantha|victoria|karen|aria|jenny|libby|serena|female/i) ||
-      pool[pool.length > 1 ? 1 : 0]
-    );
-  }
-  if (role === 'examiner') {
-    return byPattern(/moira|fiona|tessa|sonia|emma|google uk/i) || pool[pool.length > 2 ? 2 : 0];
-  }
-  if (role === 'scout') {
-    return byPattern(/google us|zira|sara|ava|allison/i) || pool[pool.length > 3 ? 3 : 0];
-  }
-  return byPattern(/ryan|thomas|oliver|matthew|mark|andrew/i) || pool[0];
+interface ArcadeVoiceProfile {
+  waveform: OscillatorType;
+  subWaveform: OscillatorType;
+  baseHz: number;
+  pitchSpan: number;
+  formantLowHz: number;
+  formantHighHz: number;
+  filterType: BiquadFilterType;
+  filterQ: number;
+  blipMs: number;
+  gapMs: number;
+  volume: number;
+  pitchSlide: number;
 }
 
-const VOICE_TUNING: Record<CourtVoiceRole, { pitch: number; rate: number; volume: number }> = {
-  scout: { pitch: 1.12, rate: 1.12, volume: 0.92 },
-  proponent: { pitch: 0.96, rate: 1.08, volume: 0.96 },
-  opponent: { pitch: 1.13, rate: 1.1, volume: 0.96 },
-  examiner: { pitch: 1.03, rate: 1.1, volume: 0.92 },
-  judge: { pitch: 0.8, rate: 0.98, volume: 1.0 },
+const ARCADE_VOICE_PROFILES: Record<CourtVoiceRole, ArcadeVoiceProfile> = {
+  scout: {
+    waveform: 'triangle',
+    subWaveform: 'square',
+    baseHz: 470,
+    pitchSpan: 0.34,
+    formantLowHz: 1100,
+    formantHighHz: 2300,
+    filterType: 'bandpass',
+    filterQ: 2.0,
+    blipMs: 44,
+    gapMs: 18,
+    volume: 0.16,
+    pitchSlide: 1.12,
+  },
+  proponent: {
+    waveform: 'sawtooth',
+    subWaveform: 'triangle',
+    baseHz: 235,
+    pitchSpan: 0.24,
+    formantLowHz: 680,
+    formantHighHz: 1450,
+    filterType: 'lowpass',
+    filterQ: 3.2,
+    blipMs: 58,
+    gapMs: 22,
+    volume: 0.18,
+    pitchSlide: 1.05,
+  },
+  opponent: {
+    waveform: 'square',
+    subWaveform: 'sawtooth',
+    baseHz: 340,
+    pitchSpan: 0.32,
+    formantLowHz: 950,
+    formantHighHz: 2100,
+    filterType: 'bandpass',
+    filterQ: 2.8,
+    blipMs: 52,
+    gapMs: 20,
+    volume: 0.15,
+    pitchSlide: 0.88,
+  },
+  examiner: {
+    waveform: 'triangle',
+    subWaveform: 'sawtooth',
+    baseHz: 300,
+    pitchSpan: 0.26,
+    formantLowHz: 850,
+    formantHighHz: 1750,
+    filterType: 'bandpass',
+    filterQ: 2.4,
+    blipMs: 50,
+    gapMs: 18,
+    volume: 0.17,
+    pitchSlide: 1.08,
+  },
+  judge: {
+    waveform: 'sawtooth',
+    subWaveform: 'triangle',
+    baseHz: 136,
+    pitchSpan: 0.16,
+    formantLowHz: 420,
+    formantHighHz: 860,
+    filterType: 'lowpass',
+    filterQ: 2.8,
+    blipMs: 74,
+    gapMs: 28,
+    volume: 0.22,
+    pitchSlide: 0.94,
+  },
 };
 
+interface GibberishSyllable {
+  charCode: number;
+  vowelBoost: number;
+  pauseAfterMs: number;
+}
+
 /**
- * Speaks the character's courtroom line aloud with distinct voice profile & cadence.
+ * Converts readable dialogue into deterministic arcade gibberish syllable bursts
+ * so characters "chatter" expressively without speaking literal words.
+ */
+function buildGibberishSyllables(text: string): GibberishSyllable[] {
+  const words = text
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(' ')
+    .filter(Boolean);
+
+  const syllables: GibberishSyllable[] = [];
+  const maxSyllables = 24;
+
+  for (let wIdx = 0; wIdx < words.length && syllables.length < maxSyllables; wIdx++) {
+    const word = words[wIdx];
+    const clean = word.replace(/[^a-zA-Z0-9]/g, '');
+    if (!clean) continue;
+
+    // 1 to 2 arcade vocal blips per word depending on word length
+    const chunks = clean.length >= 6 ? 2 : 1;
+    for (let c = 0; c < chunks && syllables.length < maxSyllables; c++) {
+      const ch = clean.charAt(c * 3) || clean.charAt(0);
+      const code = ch.toLowerCase().charCodeAt(0);
+      const hasBrightVowel = /[eiy]/i.test(clean);
+      const hasOpenVowel = /[ao]/i.test(clean);
+      const vowelBoost = hasBrightVowel ? 1.18 : hasOpenVowel ? 0.94 : 1.04;
+      const endsWithComma = c === chunks - 1 && /[,;:\-]$/.test(word);
+      const endsWithSentence = c === chunks - 1 && /[.!?]$/.test(word);
+
+      syllables.push({
+        charCode: code,
+        vowelBoost,
+        pauseAfterMs: endsWithSentence ? 68 : endsWithComma ? 44 : c === chunks - 1 ? 14 : 0,
+      });
+    }
+  }
+
+  return syllables;
+}
+
+function scheduleArcadeGibberish(
+  ctx: AudioContext,
+  role: CourtVoiceRole,
+  rawText: string,
+  rateMultiplier: number,
+  generationId: number
+): void {
+  if (generationId !== speechGenerationId) return;
+
+  const profile = ARCADE_VOICE_PROFILES[role];
+  const bus = getSpeechBus(ctx);
+  const syllables = buildGibberishSyllables(rawText);
+  if (!syllables.length) return;
+
+  const tempoScale = rateMultiplier > 1.3 ? 0.72 : rateMultiplier > 1.05 ? 0.85 : 1.0;
+  const endsQuestion = rawText.trim().endsWith('?');
+  const endsExclaim = rawText.trim().endsWith('!');
+
+  let cursorSec = ctx.currentTime + 0.025;
+  const maxTotalSec = 1.85 * tempoScale;
+  const totalSyllables = syllables.length;
+
+  for (let i = 0; i < totalSyllables; i++) {
+    if (cursorSec - ctx.currentTime >= maxTotalSec) break;
+
+    const s = syllables[i];
+    const progress = totalSyllables > 1 ? i / (totalSyllables - 1) : 0;
+
+    // Deterministic bouncy pseudo-random contour per character
+    const hash = Math.abs(Math.sin((s.charCode + i * 7) * 12.9898));
+    let contour = 1 + (hash - 0.5) * 2 * profile.pitchSpan;
+
+    if (endsQuestion && progress > 0.72) {
+      contour *= 1 + (progress - 0.72) * 0.95;
+    } else if (endsExclaim && (progress < 0.2 || progress > 0.78)) {
+      contour *= 1.16;
+    } else if (progress > 0.84) {
+      contour *= 0.9;
+    }
+
+    const startHz = Math.max(80, profile.baseHz * contour * s.vowelBoost);
+    const endHz = Math.max(75, startHz * profile.pitchSlide);
+    const durSec = Math.max(0.032, (profile.blipMs / 1000) * tempoScale * (0.86 + hash * 0.28));
+
+    const osc = ctx.createOscillator();
+    osc.type = profile.waveform;
+    osc.frequency.setValueAtTime(startHz, cursorSec);
+    osc.frequency.exponentialRampToValueAtTime(endHz, cursorSec + durSec);
+
+    const subOsc = ctx.createOscillator();
+    subOsc.type = profile.subWaveform;
+    subOsc.frequency.setValueAtTime(startHz * (role === 'judge' ? 0.5 : 1.5), cursorSec);
+    subOsc.frequency.exponentialRampToValueAtTime(
+      endHz * (role === 'judge' ? 0.5 : 1.5),
+      cursorSec + durSec
+    );
+
+    const subGain = ctx.createGain();
+    subGain.gain.setValueAtTime(role === 'judge' ? 0.45 : 0.24, cursorSec);
+
+    const formantFilter = ctx.createBiquadFilter();
+    formantFilter.type = profile.filterType;
+    const fStart = profile.formantLowHz + (hash * (profile.formantHighHz - profile.formantLowHz));
+    const fEnd = profile.formantHighHz - (hash * (profile.formantHighHz - profile.formantLowHz) * 0.45);
+    formantFilter.frequency.setValueAtTime(fStart, cursorSec);
+    formantFilter.frequency.linearRampToValueAtTime(fEnd, cursorSec + durSec);
+    formantFilter.Q.setValueAtTime(profile.filterQ, cursorSec);
+
+    const env = ctx.createGain();
+    const peak = endsExclaim && progress > 0.75 ? profile.volume * 1.18 : profile.volume;
+    env.gain.setValueAtTime(0.0001, cursorSec);
+    env.gain.linearRampToValueAtTime(peak, cursorSec + 0.008);
+    env.gain.setValueAtTime(peak * 0.85, cursorSec + durSec * 0.62);
+    env.gain.exponentialRampToValueAtTime(0.0001, cursorSec + durSec);
+
+    osc.connect(formantFilter);
+    subOsc.connect(subGain);
+    subGain.connect(formantFilter);
+    formantFilter.connect(env);
+    env.connect(bus);
+
+    osc.start(cursorSec);
+    subOsc.start(cursorSec);
+    osc.stop(cursorSec + durSec + 0.01);
+    subOsc.stop(cursorSec + durSec + 0.01);
+
+    activeSpeechNodes.push(osc, subOsc, subGain, formantFilter, env);
+
+    const gapSec = ((profile.gapMs + s.pauseAfterMs) / 1000) * tempoScale;
+    cursorSec += durSec + gapSec;
+  }
+}
+
+/**
+ * Speaks the character's line using synthesized arcade-game gibberish syllables
+ * ("blah-bluh-blip" vocal chatter) while keeping original text in speech bubbles.
  */
 export function speakCourtLine(
   role: CourtVoiceRole,
   rawText: string,
   rateMultiplier = 1
 ): void {
-  if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+  if (typeof window === 'undefined') return;
   const text = rawText.replace(/\s+/g, ' ').trim();
   if (!text) return;
 
-  try {
-    refreshVoices();
-    const synth = window.speechSynthesis;
-    synth.cancel();
+  stopCourtSpeech();
+  const generationId = speechGenerationId;
 
-    const utterance = new SpeechSynthesisUtterance(text);
-    const chosenVoice = pickVoiceForRole(cachedVoices, role);
-    if (chosenVoice) {
-      utterance.voice = chosenVoice;
-      utterance.lang = chosenVoice.lang;
-    } else {
-      utterance.lang = 'en-US';
-    }
+  const ctx = getAudioContext();
+  if (!ctx) return;
 
-    const tune = VOICE_TUNING[role];
-    utterance.pitch = tune.pitch;
-    utterance.rate = Math.min(1.48, tune.rate * (rateMultiplier > 1 ? 1.18 : 1.0));
-    utterance.volume = tune.volume;
+  if (ctx.state === 'suspended') {
+    ctx
+      .resume()
+      .then(() => {
+        if (ctx.state === 'running' && generationId === speechGenerationId) {
+          scheduleArcadeGibberish(ctx, role, text, rateMultiplier, generationId);
+        }
+      })
+      .catch(() => {});
+    return;
+  }
 
-    synth.speak(utterance);
-  } catch {
-    // Ignore restricted speech contexts
+  if (ctx.state === 'running') {
+    scheduleArcadeGibberish(ctx, role, text, rateMultiplier, generationId);
   }
 }
