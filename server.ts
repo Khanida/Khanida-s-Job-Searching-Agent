@@ -39,8 +39,9 @@ const DB_PATH = path.resolve(process.cwd(), 'data', 'jobs.db');
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 const db = new DatabaseSync(DB_PATH);
-db.exec('PRAGMA journal_mode = WAL;');
-db.exec('PRAGMA synchronous = NORMAL;');
+db.exec('PRAGMA busy_timeout = 5000;');
+db.exec('PRAGMA journal_mode = TRUNCATE;');
+db.exec('PRAGMA synchronous = FULL;');
 
 function ensureSchema() {
   db.exec(`
@@ -1453,6 +1454,10 @@ function ensureDaily24hDeliberation() {
 
 async function startServer() {
   recalibrateScoresFromWeights(db, getProfileRow());
+  const verdictsCount = Number((db.prepare('SELECT COUNT(*) as c FROM jury_verdicts').get() as { c: number }).c);
+  if (verdictsCount === 0) {
+    runJuryDeliberation(db, getProfileRow());
+  }
   ensureDaily24hDeliberation();
   // Kick off initial background source sync if only a few boards are present
   const sourceCount = Number((db.prepare('SELECT COUNT(DISTINCT source) as c FROM jobs').get() as { c: number }).c);
@@ -1478,9 +1483,20 @@ async function startServer() {
     app.use(vite.middlewares);
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const httpServer = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server listening on http://0.0.0.0:${PORT}`);
   });
+
+  const shutdown = () => {
+    httpServer.close(() => {
+      try {
+        db.close();
+      } catch {}
+      process.exit(0);
+    });
+  };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
 }
 
 startServer();

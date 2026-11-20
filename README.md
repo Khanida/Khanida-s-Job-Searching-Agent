@@ -6,7 +6,8 @@ A multi-agent job search dashboard for tracking, evaluating, and applying to job
 
 ## Live Demo
 
-- **Live App:** https://ais-pre-fydkpanbgwhnloy6xrxq34-885189251864.europe-west2.run.app
+- **Live Website (Shared App URL):** [https://ais-pre-fydkpanbgwhnloy6xrxq34-885189251864.europe-west2.run.app](https://ais-pre-fydkpanbgwhnloy6xrxq34-885189251864.europe-west2.run.app)
+- **Development App URL:** [https://ais-dev-fydkpanbgwhnloy6xrxq34-885189251864.europe-west2.run.app](https://ais-dev-fydkpanbgwhnloy6xrxq34-885189251864.europe-west2.run.app)
 
 ## Overview
 
