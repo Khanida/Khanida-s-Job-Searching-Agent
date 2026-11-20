@@ -48,6 +48,11 @@ export interface JobItem {
   posted_date: string;
   status: JobStatus;
   created_at: string;
+  salary_min?: number | null;
+  salary_max?: number | null;
+  salary_currency?: string | null;
+  location_priority_tier?: number;
+  location_priority_label?: string;
   learned_boost?: number;
   learned_reasons?: string[];
   has_application?: boolean;
@@ -122,9 +127,30 @@ export interface JuryDecisionSnapshot {
   topMatchScore: number;
 }
 
+export interface DailyDigestEntry {
+  job: JobItem;
+  consensusScore: number;
+  verdict: string;
+  strengths: string | null;
+  recommendation: string | null;
+  advocateName: string;
+  advocateRole: string;
+  advocateStatement: string;
+}
+
+export interface DailyDigestData {
+  cycleDate: string;
+  cycleTimestamp: string;
+  withinLast24Hours: boolean;
+  reviewedCount: number;
+  cycleSummary: string;
+  items: DailyDigestEntry[];
+}
+
 export interface DashboardResponse {
   stats: DashboardStats;
   dailyPicks: JobItem[];
+  dailyDigest?: DailyDigestData;
   jobs: JobItem[];
   pagination: {
     page: number;
@@ -134,6 +160,11 @@ export interface DashboardResponse {
   };
   profile: CandidateProfile;
   latestDeliberation: DeliberationSession | null;
+  salaryStats?: {
+    disclosedCount: number;
+    minAvailable: number;
+    maxAvailable: number;
+  };
   jurySnapshot?: JuryDecisionSnapshot;
   juryHistory?: JuryDecisionSnapshot[];
   googleSearchUrl: string;

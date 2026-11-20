@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
-import { Cloud, Save, Upload } from 'lucide-react';
+import { Cloud, Download, Save, Upload } from 'lucide-react';
 import type { CandidateProfile } from '../types.ts';
 import { useAuth } from '../contexts/AuthContext.tsx';
 import { syncProfileToCloud } from '../firebase.ts';
+import { buildExportResumeFromProfile, exportResumeToPdf } from '../utils/pdfExport.ts';
 
 interface ProfileViewProps {
   onNotify: (message: string) => void;
@@ -136,6 +137,22 @@ export function ProfileView({ onNotify, onProfileSaved }: ProfileViewProps) {
     }
   };
 
+  const handleExportCvPdf = () => {
+    const resumeData = buildExportResumeFromProfile({
+      name,
+      residence,
+      citizenship,
+      degree,
+      targetRoles,
+      skills,
+      cvText,
+      summaryFallback: profile?.cv_analysis?.summary,
+    });
+    const safeName = (name || 'candidate').trim().replace(/[^a-zA-Z0-9_-]+/g, '_');
+    const filename = exportResumeToPdf(resumeData, 'executive', safeName, `${safeName}_CV.pdf`);
+    onNotify(`Downloaded ${filename}.`);
+  };
+
   if (loading) {
     return (
       <div className="space-y-6 animate-pulse">
@@ -194,17 +211,29 @@ export function ProfileView({ onNotify, onProfileSaved }: ProfileViewProps) {
             </p>
           </div>
 
-          <label className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg cursor-pointer transition-colors whitespace-nowrap self-start sm:self-auto">
-            <Upload className="w-3.5 h-3.5" />
-            <span>{uploading ? 'Analyzing…' : 'Upload CV File'}</span>
-            <input
-              type="file"
-              accept=".txt,.md,.docx,.pdf"
-              onChange={handleCvUpload}
-              disabled={uploading}
-              className="sr-only"
-            />
-          </label>
+          <div className="flex flex-wrap items-center gap-2.5 self-start sm:self-auto">
+            <button
+              type="button"
+              onClick={handleExportCvPdf}
+              disabled={!cvText.trim() && !skills.trim() && !name.trim()}
+              className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-blue-700 bg-blue-50 border border-blue-200 hover:bg-blue-100 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors whitespace-nowrap"
+            >
+              <Download className="w-3.5 h-3.5" aria-hidden="true" />
+              <span>Export CV as PDF</span>
+            </button>
+
+            <label className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg cursor-pointer transition-colors whitespace-nowrap">
+              <Upload className="w-3.5 h-3.5" aria-hidden="true" />
+              <span>{uploading ? 'Analyzing…' : 'Upload CV File'}</span>
+              <input
+                type="file"
+                accept=".txt,.md,.docx,.pdf"
+                onChange={handleCvUpload}
+                disabled={uploading}
+                className="sr-only"
+              />
+            </label>
+          </div>
         </div>
 
         {profile?.cv_analysis && (

@@ -2,6 +2,12 @@
 
 A multi-agent job search dashboard for tracking, evaluating, and applying to jobs with a more deliberate hiring workflow. The app blends a local job radar, CV/profile matching, AI-driven deliberation, and a "Supreme Jury" recommendation model to surface the most realistic opportunities for a candidate.
 
+**Live Website:** [https://ais-pre-fydkpanbgwhnloy6xrxq34-885189251864.europe-west2.run.app](https://ais-pre-fydkpanbgwhnloy6xrxq34-885189251864.europe-west2.run.app)
+
+## Live Demo
+
+- **Live App:** https://ais-pre-fydkpanbgwhnloy6xrxq34-885189251864.europe-west2.run.app
+
 ## Overview
 
 This project helps a job seeker:

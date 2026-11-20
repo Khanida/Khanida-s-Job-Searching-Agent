@@ -59,7 +59,8 @@ function triggerBlobDownload(doc: jsPDF, filename: string): void {
 export function exportResumeToPdf(
   resume: ExportResumeData,
   template: PdfTemplate,
-  companyName?: string
+  companyName?: string,
+  customFilename?: string
 ): string {
   const doc = new jsPDF({
     orientation: 'portrait',
@@ -388,9 +389,141 @@ export function exportResumeToPdf(
   }
 
   const safeCompany = (companyName || 'company').replace(/[^a-zA-Z0-9_-]+/g, '_');
-  const filename = `${safeCompany}_tailored_resume.pdf`;
+  const filename = customFilename || `${safeCompany}_tailored_resume.pdf`;
   triggerBlobDownload(doc, filename);
   return filename;
+}
+
+export function buildExportResumeFromProfile(input: {
+  name: string;
+  residence: string;
+  citizenship: string;
+  degree: string;
+  targetRoles: string;
+  skills: string;
+  cvText: string;
+  summaryFallback?: string;
+}): ExportResumeData {
+  const cleaned = (input.cvText || '')
+    .replace(/\uFFFD+/g, '')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+    .replace(/\uFB01/g, 'fi')
+    .replace(/\uFB02/g, 'fl')
+    .trim();
+
+  const lines = cleaned
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  let currentSection: 'header' | 'summary' | 'skills' | 'education' | 'experience' = 'header';
+  const summaryLines: string[] = [];
+  const eduLines: string[] = [];
+  const expLines: string[] = [];
+
+  for (const line of lines) {
+    const upper = line.replace(/[:\-_=]+$/g, '').trim().toUpperCase();
+    if (/^(PROFESSIONAL\s+)?SUMMARY|PROFILE|OBJECTIVE|ABOUT(\s+ME)?$/.test(upper)) {
+      currentSection = 'summary';
+      continue;
+    }
+    if (/^(CORE\s+)?SKILLS(\s*&\s*COMPETENCIES)?|TECHNICAL\s+SKILLS|TECHNOLOGIES|COMPETENCIES$/.test(upper)) {
+      currentSection = 'skills';
+      continue;
+    }
+    if (/^EDUCATION|ACADEMIC(\s+BACKGROUND)?$/.test(upper)) {
+      currentSection = 'education';
+      continue;
+    }
+    if (/^(WORK\s+)?EXPERIENCE|EMPLOYMENT|PROJECTS?|KEY\s+PROJECTS|EXPERIENCE\s*&\s*PROJECTS|INTERNSHIPS?$/.test(upper)) {
+      currentSection = 'experience';
+      continue;
+    }
+
+    if (currentSection === 'summary') {
+      summaryLines.push(line);
+    } else if (currentSection === 'education') {
+      eduLines.push(line);
+    } else if (currentSection === 'experience') {
+      expLines.push(line);
+    } else if (currentSection === 'header' && line.length > 45 && !/@|https?:\/\//i.test(line)) {
+      // Unheaded descriptive lines go into experience/background if no section header matched
+      expLines.push(line);
+    }
+  }
+
+  const entries: ExportExperienceEntry[] = [];
+  let activeEntry: ExportExperienceEntry | null = null;
+  for (const line of expLines) {
+    const isBullet = /^[•\-*]\s+/.test(line);
+    const cleanLine = line.replace(/^[•\-*]\s*/, '').trim();
+    if (!cleanLine) continue;
+
+    if (!isBullet) {
+      const headerMatch = cleanLine.match(/^([^|—–(]{3,}?)\s*(?:—|–|\|)\s*([^(\n]{2,}?)(?:\s*\(([^)]+)\))?$/);
+      if (headerMatch) {
+        activeEntry = {
+          title: headerMatch[1].trim(),
+          organization: headerMatch[2].trim(),
+          dates: (headerMatch[3] || '').trim(),
+          bullets: [],
+        };
+        entries.push(activeEntry);
+        continue;
+      }
+      if (!activeEntry || (cleanLine.length < 85 && activeEntry.bullets.length > 0)) {
+        activeEntry = {
+          title: cleanLine,
+          organization: '',
+          dates: '',
+          bullets: [],
+        };
+        entries.push(activeEntry);
+        continue;
+      }
+    }
+
+    if (!activeEntry) {
+      activeEntry = {
+        title: 'Experience & Technical Background',
+        organization: '',
+        dates: '',
+        bullets: [],
+      };
+      entries.push(activeEntry);
+    }
+    activeEntry.bullets.push(cleanLine);
+  }
+
+  const parsedSkills = (input.skills || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const primaryRole = (input.targetRoles || '')
+    .split(',')
+    .map((r) => r.trim())
+    .find(Boolean);
+
+  const subtitle = [input.residence.trim(), primaryRole, input.citizenship.trim()]
+    .filter(Boolean)
+    .join(' · ');
+
+  const summary =
+    summaryLines.join(' ').trim() ||
+    (input.summaryFallback || '').trim() ||
+    `${input.degree ? `${input.degree} graduate` : 'Candidate'} targeting ${
+      input.targetRoles || 'Software & Engineering'
+    } roles with hands-on strengths in ${parsedSkills.slice(0, 6).join(', ') || 'technical delivery'}.`;
+
+  return {
+    fullName: input.name.trim() || 'Candidate Name',
+    subtitle,
+    summary,
+    skills: parsedSkills,
+    education: eduLines.join(' · ').trim() || input.degree.trim(),
+    entries,
+  };
 }
 
 export function exportCoverLetterToPdf(

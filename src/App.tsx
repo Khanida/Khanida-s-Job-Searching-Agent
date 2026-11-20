@@ -9,9 +9,13 @@ import { SettingsView } from './components/SettingsView.tsx';
 import { JobDetailDrawer } from './components/JobDetailDrawer.tsx';
 import { RejectModal } from './components/RejectModal.tsx';
 import { ApplicationModal } from './components/ApplicationModal.tsx';
+import { OnboardingWalkthrough } from './components/OnboardingWalkthrough.tsx';
+import { SALARY_SLIDER_MAX, SALARY_SLIDER_MIN } from './components/SalaryRangeSlider.tsx';
 import { AuthProvider, useAuth } from './contexts/AuthContext.tsx';
 import { syncJobActionToCloud, syncLearnedWeightsToCloud } from './firebase.ts';
 import type { DashboardResponse, JobItem, JobStatus } from './types.ts';
+
+const WALKTHROUGH_STORAGE_KEY = 'adeena_job_agent_tour_v1';
 
 type ClickEventType = 'click' | 'inspect' | 'open_link' | 'view_debate' | 'view_drafts';
 
@@ -33,6 +37,13 @@ function AppWorkspace({
   const [livenessFilter, setLivenessFilter] = useState('all');
   const [searchInput, setSearchInput] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
+  const [minSalary, setMinSalary] = useState(SALARY_SLIDER_MIN);
+  const [maxSalary, setMaxSalary] = useState(SALARY_SLIDER_MAX);
+  const [debouncedSalaryRange, setDebouncedSalaryRange] = useState({
+    min: SALARY_SLIDER_MIN,
+    max: SALARY_SLIDER_MAX,
+  });
+  const [includeUndisclosed, setIncludeUndisclosed] = useState(false);
   const [page, setPage] = useState(1);
 
   // Shared modals & drawers
@@ -44,8 +55,24 @@ function AppWorkspace({
   const [isConvening, setIsConvening] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
+  const [walkthroughOpen, setWalkthroughOpen] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem(WALKTHROUGH_STORAGE_KEY) !== 'done';
+    } catch {
+      return false;
+    }
+  });
   const lastCycleAtRef = useRef<number>(Date.now());
   const bootStartedRef = useRef(false);
+
+  const closeWalkthrough = useCallback(() => {
+    setWalkthroughOpen(false);
+    try {
+      window.localStorage.setItem(WALKTHROUGH_STORAGE_KEY, 'done');
+    } catch {
+      // Ignore storage failures
+    }
+  }, []);
 
   const notify = useCallback((message: string) => {
     setToast(message);
@@ -66,6 +93,15 @@ function AppWorkspace({
     return () => window.clearTimeout(timer);
   }, [searchInput]);
 
+  // Debounce salary range slider
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedSalaryRange({ min: minSalary, max: maxSalary });
+      setPage(1);
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [minSalary, maxSalary]);
+
   const fetchDashboard = useCallback(
     async (quiet = false) => {
       if (!quiet) {
@@ -78,6 +114,9 @@ function AppWorkspace({
           source: sourceFilter,
           liveness: livenessFilter,
           q: debouncedQuery,
+          minSalary: String(debouncedSalaryRange.min),
+          maxSalary: String(debouncedSalaryRange.max),
+          includeUndisclosed: String(includeUndisclosed),
           page: String(page),
           limit: '20',
         });
@@ -93,7 +132,15 @@ function AppWorkspace({
         }
       }
     },
-    [statusFilter, sourceFilter, livenessFilter, debouncedQuery, page]
+    [
+      statusFilter,
+      sourceFilter,
+      livenessFilter,
+      debouncedQuery,
+      debouncedSalaryRange,
+      includeUndisclosed,
+      page,
+    ]
   );
 
   useEffect(() => {
@@ -250,6 +297,52 @@ function AppWorkspace({
     };
   }, [handleConveneJury]);
 
+  // Global keyboard shortcuts: O (Overview), J (Jury Room), P (Profile), S (Settings), ? (Walkthrough)
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (
+        tag === 'INPUT' ||
+        tag === 'TEXTAREA' ||
+        tag === 'SELECT' ||
+        target?.isContentEditable
+      ) {
+        return;
+      }
+
+      if (e.key === '?') {
+        e.preventDefault();
+        setWalkthroughOpen((prev) => !prev);
+        return;
+      }
+
+      if (walkthroughOpen || selectedJobId || rejectTarget || applicationJobId) {
+        return;
+      }
+
+      const key = e.key.toLowerCase();
+      if (key === 'o') {
+        e.preventDefault();
+        setActiveTab('overview');
+      } else if (key === 'j') {
+        e.preventDefault();
+        setActiveTab('jury');
+      } else if (key === 'p') {
+        e.preventDefault();
+        setActiveTab('profile');
+      } else if (key === 's') {
+        e.preventDefault();
+        setActiveTab('settings');
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [walkthroughOpen, selectedJobId, rejectTarget, applicationJobId]);
+
   const activeError = errorBanner || cloudError;
 
   return (
@@ -265,6 +358,7 @@ function AppWorkspace({
         onNavigate={setActiveTab}
         onConveneJury={() => void handleConveneJury(false)}
         isConvening={isConvening}
+        onOpenWalkthrough={() => setWalkthroughOpen(true)}
       />
 
       {/* Toast Notification */}
@@ -321,6 +415,9 @@ function AppWorkspace({
             sourceFilter={sourceFilter}
             livenessFilter={livenessFilter}
             searchInput={searchInput}
+            minSalary={minSalary}
+            maxSalary={maxSalary}
+            includeUndisclosed={includeUndisclosed}
             page={page}
             isConvening={isConvening}
             onStatusFilterChange={(next) => {
@@ -339,6 +436,20 @@ function AppWorkspace({
               setPage(1);
             }}
             onSearchInputChange={setSearchInput}
+            onSalaryRangeChange={(nextMin, nextMax) => {
+              setMinSalary(nextMin);
+              setMaxSalary(nextMax);
+            }}
+            onIncludeUndisclosedChange={(next) => {
+              setIncludeUndisclosed(next);
+              setPage(1);
+            }}
+            onResetSalaryRange={() => {
+              setMinSalary(SALARY_SLIDER_MIN);
+              setMaxSalary(SALARY_SLIDER_MAX);
+              setIncludeUndisclosed(false);
+              setPage(1);
+            }}
             onPageChange={setPage}
             onSelectJob={handleSelectJob}
             onQuickStatus={handleStatusChange}
@@ -410,6 +521,12 @@ function AppWorkspace({
         jobId={applicationJobId}
         onClose={() => setApplicationJobId(null)}
         onNotify={notify}
+      />
+
+      <OnboardingWalkthrough
+        open={walkthroughOpen}
+        onClose={closeWalkthrough}
+        onNavigate={setActiveTab}
       />
     </div>
   );

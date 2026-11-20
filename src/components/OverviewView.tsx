@@ -11,6 +11,8 @@ import {
 import type { DashboardResponse, JobItem, JobStatus } from '../types.ts';
 import { AuthenticityLabel, LivenessLabel, PipelineStatusLabel } from './StatusText.tsx';
 import { CuteRadarWidget } from './CuteRadarWidget.tsx';
+import { DailyDigest } from './DailyDigest.tsx';
+import { formatJobSalaryBadge, SalaryRangeSlider } from './SalaryRangeSlider.tsx';
 
 interface OverviewViewProps {
   data: DashboardResponse | null;
@@ -19,12 +21,18 @@ interface OverviewViewProps {
   sourceFilter: string;
   livenessFilter: string;
   searchInput: string;
+  minSalary: number;
+  maxSalary: number;
+  includeUndisclosed: boolean;
   page: number;
   isConvening: boolean;
   onStatusFilterChange: (status: string) => void;
   onSourceFilterChange: (source: string) => void;
   onLivenessFilterChange: (liveness: string) => void;
   onSearchInputChange: (value: string) => void;
+  onSalaryRangeChange: (min: number, max: number) => void;
+  onIncludeUndisclosedChange: (include: boolean) => void;
+  onResetSalaryRange: () => void;
   onPageChange: (page: number) => void;
   onSelectJob: (job: JobItem, eventType?: 'inspect' | 'view_debate') => void;
   onQuickStatus: (job: JobItem, status: JobStatus) => Promise<void>;
@@ -42,12 +50,18 @@ export function OverviewView({
   sourceFilter,
   livenessFilter,
   searchInput,
+  minSalary,
+  maxSalary,
+  includeUndisclosed,
   page,
   isConvening,
   onStatusFilterChange,
   onSourceFilterChange,
   onLivenessFilterChange,
   onSearchInputChange,
+  onSalaryRangeChange,
+  onIncludeUndisclosedChange,
+  onResetSalaryRange,
   onPageChange,
   onSelectJob,
   onQuickStatus,
@@ -219,6 +233,11 @@ export function OverviewView({
                     <p className="text-sm text-slate-600 mt-1 truncate">
                       {pick.company} · {pick.location || 'Remote'}
                     </p>
+                    {pick.location_priority_tier && pick.location_priority_tier <= 2 && pick.location_priority_label && (
+                      <p className="text-[11px] font-medium text-blue-700 mt-1 truncate">
+                        {pick.location_priority_label}
+                      </p>
+                    )}
                   </div>
 
                   <div className="pt-3 border-t border-slate-100 flex items-center justify-between gap-3">
@@ -329,6 +348,17 @@ export function OverviewView({
         )}
       </section>
 
+      {/* 24-Hour Agent Daily Digest (Top 3 High-Affinity Matches) */}
+      <DailyDigest
+        digest={data?.dailyDigest}
+        loading={loading && !data}
+        onSelectJob={onSelectJob}
+        onQuickStatus={onQuickStatus}
+        onOpenApplication={onOpenApplication}
+        onTrackClick={onTrackClick}
+        onNavigateJury={() => onNavigateTab('jury')}
+      />
+
       {/* Master Opportunities Pipeline */}
       <section className="space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-2">
@@ -345,91 +375,103 @@ export function OverviewView({
         </div>
 
         {/* Filter & Search Bar */}
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-white border border-slate-200 rounded-xl p-3">
-          {/* Interactive Status Segmented Control */}
-          <div
-            role="tablist"
-            aria-label="Filter vacancies by status"
-            className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg overflow-x-auto"
-          >
-            {statusTabs.map((tab) => {
-              const active = statusFilter === tab.key;
-              return (
+        <div className="bg-white border border-slate-200 rounded-xl p-3 space-y-2">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+            {/* Interactive Status Segmented Control */}
+            <div
+              role="tablist"
+              aria-label="Filter vacancies by status"
+              className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg overflow-x-auto"
+            >
+              {statusTabs.map((tab) => {
+                const active = statusFilter === tab.key;
+                return (
+                  <button
+                    key={tab.key}
+                    role="tab"
+                    type="button"
+                    aria-selected={active}
+                    onClick={() => onStatusFilterChange(tab.key)}
+                    className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 tabular-nums ${
+                      active
+                        ? 'bg-white text-slate-900 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    {tab.label}
+                    {typeof tab.count === 'number' ? ` (${tab.count})` : ''}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Search & Secondary Filters */}
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                aria-label="Filter by source"
+                value={sourceFilter}
+                onChange={(e) => onSourceFilterChange(e.target.value)}
+                className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+              >
+                <option value="all">All Sources</option>
+                {stats?.sources.map((s) => (
+                  <option key={s.source} value={s.source}>
+                    {s.source} ({s.count})
+                  </option>
+                ))}
+              </select>
+
+              <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
                 <button
-                  key={tab.key}
-                  role="tab"
                   type="button"
-                  aria-selected={active}
-                  onClick={() => onStatusFilterChange(tab.key)}
-                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 tabular-nums ${
-                    active
+                  onClick={() => onLivenessFilterChange('all')}
+                  className={`px-2.5 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap ${
+                    livenessFilter === 'all'
                       ? 'bg-white text-slate-900 shadow-xs'
                       : 'text-slate-600 hover:text-slate-900'
                   }`}
                 >
-                  {tab.label}
-                  {typeof tab.count === 'number' ? ` (${tab.count})` : ''}
+                  All Links
                 </button>
-              );
-            })}
-          </div>
+                <button
+                  type="button"
+                  onClick={() => onLivenessFilterChange('live')}
+                  className={`px-2.5 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap ${
+                    livenessFilter === 'live'
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Live Only
+                </button>
+              </div>
 
-          {/* Search & Secondary Filters */}
-          <div className="flex flex-wrap items-center gap-2">
-            <select
-              aria-label="Filter by source"
-              value={sourceFilter}
-              onChange={(e) => onSourceFilterChange(e.target.value)}
-              className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
-            >
-              <option value="all">All Sources</option>
-              {stats?.sources.map((s) => (
-                <option key={s.source} value={s.source}>
-                  {s.source} ({s.count})
-                </option>
-              ))}
-            </select>
-
-            <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
-              <button
-                type="button"
-                onClick={() => onLivenessFilterChange('all')}
-                className={`px-2.5 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap ${
-                  livenessFilter === 'all'
-                    ? 'bg-white text-slate-900 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                All Links
-              </button>
-              <button
-                type="button"
-                onClick={() => onLivenessFilterChange('live')}
-                className={`px-2.5 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap ${
-                  livenessFilter === 'live'
-                    ? 'bg-white text-slate-900 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                Live Only
-              </button>
-            </div>
-
-            <div className="relative flex-1 sm:flex-initial min-w-[220px]">
-              <Search
-                className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none"
-                aria-hidden="true"
-              />
-              <input
-                type="search"
-                value={searchInput}
-                onChange={(e) => onSearchInputChange(e.target.value)}
-                placeholder="Search title, company, city…"
-                aria-label="Search vacancies"
-                className="w-full pl-8 pr-3 py-1.5 text-xs bg-white border border-slate-300 rounded-lg text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
-              />
+              <div className="relative flex-1 sm:flex-initial min-w-[220px]">
+                <Search
+                  className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none"
+                  aria-hidden="true"
+                />
+                <input
+                  type="search"
+                  value={searchInput}
+                  onChange={(e) => onSearchInputChange(e.target.value)}
+                  placeholder="Search title, company, city…"
+                  aria-label="Search vacancies"
+                  className="w-full pl-8 pr-3 py-1.5 text-xs bg-white border border-slate-300 rounded-lg text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
+                />
+              </div>
             </div>
           </div>
+
+          <SalaryRangeSlider
+            minSalary={minSalary}
+            maxSalary={maxSalary}
+            includeUndisclosed={includeUndisclosed}
+            disclosedCount={data?.salaryStats?.disclosedCount}
+            onChange={onSalaryRangeChange}
+            onIncludeUndisclosedChange={onIncludeUndisclosedChange}
+            onReset={onResetSalaryRange}
+          />
         </div>
 
         {/* High-Density Data Table / Responsive List */}
@@ -492,8 +534,22 @@ export function OverviewView({
                       <span className="font-medium text-slate-800">{job.company}</span>
                       <span aria-hidden="true">·</span>
                       <span>{job.location || 'Global / Remote'}</span>
+                      {job.location_priority_tier && job.location_priority_tier <= 2 && job.location_priority_label && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="font-medium text-blue-700">{job.location_priority_label}</span>
+                        </>
+                      )}
                       <span aria-hidden="true">·</span>
                       <span>Visa: {job.visa_evidence || 'Not verified'}</span>
+                      {formatJobSalaryBadge(job.salary_min, job.salary_max, job.salary_currency) && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="font-mono font-medium text-emerald-700 tabular-nums">
+                            {formatJobSalaryBadge(job.salary_min, job.salary_max, job.salary_currency)}
+                          </span>
+                        </>
+                      )}
                     </div>
                   </div>
 
@@ -591,6 +647,7 @@ export function OverviewView({
                   onSourceFilterChange('all');
                   onLivenessFilterChange('all');
                   onSearchInputChange('');
+                  onResetSalaryRange();
                 }}
                 className="px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors"
               >

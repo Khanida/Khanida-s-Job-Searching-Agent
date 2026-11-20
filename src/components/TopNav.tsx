@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ChevronDown, Cloud, Loader2, LogIn, LogOut, Scale } from 'lucide-react';
+import { ChevronDown, Cloud, HelpCircle, Loader2, LogIn, LogOut, Scale } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext.tsx';
 
 export type NavTab = 'overview' | 'jury' | 'profile' | 'settings';
@@ -9,13 +9,14 @@ interface TopNavProps {
   onNavigate: (tab: NavTab) => void;
   onConveneJury: () => void;
   isConvening: boolean;
+  onOpenWalkthrough?: () => void;
 }
 
-const NAV_ITEMS: Array<{ key: NavTab; label: string }> = [
-  { key: 'overview', label: 'Overview' },
-  { key: 'jury', label: 'Jury Room' },
-  { key: 'profile', label: 'Profile' },
-  { key: 'settings', label: 'Settings' },
+const NAV_ITEMS: Array<{ key: NavTab; label: string; shortcut: string }> = [
+  { key: 'overview', label: 'Overview', shortcut: 'O' },
+  { key: 'jury', label: 'Jury Room', shortcut: 'J' },
+  { key: 'profile', label: 'Profile', shortcut: 'P' },
+  { key: 'settings', label: 'Settings', shortcut: 'S' },
 ];
 
 export function TopNav({
@@ -23,6 +24,7 @@ export function TopNav({
   onNavigate,
   onConveneJury,
   isConvening,
+  onOpenWalkthrough,
 }: TopNavProps) {
   const { user, authReady, syncingCloud, signInWithGoogle, signOut } = useAuth();
   const isJuryFullscreen = activeTab === 'jury';
@@ -123,13 +125,23 @@ export function TopNav({
                   key={item.key}
                   type="button"
                   onClick={() => onNavigate(item.key)}
-                  className={`relative py-2 text-sm font-medium whitespace-nowrap shrink-0 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 rounded ${
+                  title={`${item.label} (Shortcut: ${item.shortcut})`}
+                  className={`relative py-2 inline-flex items-center gap-1.5 text-sm font-medium whitespace-nowrap shrink-0 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 rounded ${
                     active
                       ? 'text-blue-600'
                       : 'text-slate-600 hover:text-slate-900'
                   }`}
                 >
-                  {item.label}
+                  <span>{item.label}</span>
+                  <kbd
+                    className={`hidden lg:inline-flex items-center justify-center px-1.5 py-0.5 text-[10px] font-mono rounded border ${
+                      active
+                        ? 'text-blue-600 bg-blue-50 border-blue-200'
+                        : 'text-slate-400 bg-slate-50 border-slate-200'
+                    }`}
+                  >
+                    {item.shortcut}
+                  </kbd>
                   {active && (
                     <span
                       aria-hidden="true"
@@ -192,6 +204,18 @@ export function TopNav({
                   <span>Sign in to Save</span>
                 </button>
               )
+            )}
+
+            {onOpenWalkthrough && (
+              <button
+                type="button"
+                onClick={onOpenWalkthrough}
+                title="App walkthrough & keyboard shortcuts (?)"
+                aria-label="Open walkthrough and keyboard shortcuts"
+                className="p-2 text-slate-500 hover:text-slate-900 bg-white hover:bg-slate-50 border border-slate-200 rounded-lg transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600"
+              >
+                <HelpCircle className="w-4 h-4" aria-hidden="true" />
+              </button>
             )}
 
             <button

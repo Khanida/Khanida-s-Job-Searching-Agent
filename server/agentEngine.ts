@@ -343,6 +343,120 @@ export function googleCareersSearchUrl(profile: Partial<CandidateProfile>): stri
   return `https://www.google.com/search?q=${encodeURIComponent(query)}`;
 }
 
+export interface LocationPriorityResult {
+  tier: 1 | 2 | 3 | 4;
+  label: string;
+  scoreBonus: number;
+  inCurrentCity: boolean;
+  inCurrentCountry: boolean;
+  isRemote: boolean;
+  hasVisa: boolean;
+  hasAccommodation: boolean;
+}
+
+export function evaluateLocationPriority(
+  profile: Partial<CandidateProfile>,
+  job: Partial<JobItem>
+): LocationPriorityResult {
+  const residenceParts = (profile.residence || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  const currentCity = residenceParts[0] || '';
+  const currentCountry = residenceParts.length > 1 ? residenceParts[residenceParts.length - 1] : '';
+
+  const locLower = (job.location || '').toLowerCase();
+  const descLower = (job.description || '').toLowerCase();
+  const visaEv = (job.visa_evidence || '').toLowerCase();
+  const housingEv = (job.housing_evidence || '').toLowerCase();
+
+  const inCurrentCity = Boolean(currentCity && locLower.includes(currentCity));
+  const inCurrentCountry = Boolean(currentCountry && locLower.includes(currentCountry));
+  const isRemote = /\b(remote|worldwide|anywhere|global)\b/i.test(locLower);
+
+  const hasVisa =
+    (!visaEv.includes('not verified') &&
+      !visaEv.includes('not explicitly verified') &&
+      (visaEv.includes('mentioned') ||
+        visaEv.includes('visa') ||
+        visaEv.includes('sponsor') ||
+        visaEv.includes('work permit') ||
+        visaEv.includes('work authorization') ||
+        visaEv.includes('iqama'))) ||
+    /\b(visa sponsorship|sponsor visa|work permit|iqama|relocation sponsorship)\b/i.test(descLower);
+
+  const hasAccommodation =
+    (/accommodation:\s*mentioned|relocation:\s*mentioned|housing\s*\/\s*relocation|accommodation\s*\/\s*relocation|accommodation terms mentioned/i.test(
+      housingEv
+    ) ||
+      /\b(accommodation|housing allowance|housing provided|staff housing|company housing|temporary housing|furnished apartment|relocation package|relocation stipend|relocation assistance|relocation allowance)\b/i.test(
+        descLower
+      ));
+
+  if (inCurrentCity) {
+    return {
+      tier: 1,
+      label: `Current Location (${profile.residence?.split(',')[0]?.trim() || 'Local'})`,
+      scoreBonus: 22,
+      inCurrentCity,
+      inCurrentCountry,
+      isRemote,
+      hasVisa,
+      hasAccommodation,
+    };
+  }
+
+  if (hasVisa && hasAccommodation) {
+    return {
+      tier: 2,
+      label: inCurrentCountry ? 'Other City · Visa + Accommodation' : 'International · Visa + Accommodation',
+      scoreBonus: inCurrentCountry ? 16 : 14,
+      inCurrentCity,
+      inCurrentCountry,
+      isRemote,
+      hasVisa,
+      hasAccommodation,
+    };
+  }
+
+  if (isRemote) {
+    return {
+      tier: 3,
+      label: 'Remote Eligible',
+      scoreBonus: 6,
+      inCurrentCity,
+      inCurrentCountry,
+      isRemote,
+      hasVisa,
+      hasAccommodation,
+    };
+  }
+
+  if (inCurrentCountry || hasVisa || hasAccommodation) {
+    return {
+      tier: 3,
+      label: inCurrentCountry ? 'Same Country · Partial Support' : 'Partial Mobility Support',
+      scoreBonus: 2,
+      inCurrentCity,
+      inCurrentCountry,
+      isRemote,
+      hasVisa,
+      hasAccommodation,
+    };
+  }
+
+  return {
+    tier: 4,
+    label: 'Other Location · No Visa/Accommodation',
+    scoreBonus: -10,
+    inCurrentCity,
+    inCurrentCountry,
+    isRemote,
+    hasVisa,
+    hasAccommodation,
+  };
+}
+
 export function analyzeCv(cvText: string): CvAnalysis {
   const parsed = parseCvSections(cvText || '');
   const skills = parsed.extractedSkills;
@@ -778,7 +892,7 @@ export function runJuryDeliberation(
   const preferredCity = (profile.residence || '').split(',')[0].trim().toLowerCase();
 
   const updateJobStmt = db.prepare(
-    `UPDATE jobs SET jury_score=?, score=?, is_daily_pick=?, advocate_agent=?, jury_verdict=? WHERE id=?`
+    `UPDATE jobs SET jury_score=?, score=?, is_daily_pick=?, advocate_agent=?, jury_verdict=?, location_priority_tier=? WHERE id=?`
   );
   const insertArgStmt = db.prepare(
     `INSERT INTO agent_arguments (deliberation_id, job_id, agent_name, agent_role, argument_type, statement, score, created_at)
@@ -792,6 +906,7 @@ export function runJuryDeliberation(
   interface ScoredCandidate {
     job: JobItem;
     finalScore: number;
+    locationTier: 1 | 2 | 3 | 4;
     advocate: string;
     verdict: string;
     recommendation: string;
@@ -838,22 +953,27 @@ export function runJuryDeliberation(
       constraintNote = 'OBJECTION: Listing restricts eligibility to Saudi nationals.';
     }
 
-    const inPreferredCity = preferredCity && (job.location || '').toLowerCase().includes(preferredCity);
-    const isRemote = (job.location || '').toLowerCase().includes('remote');
-    const visaMentioned = (job.visa_evidence || '').toLowerCase().includes('mentioned');
+    const locPriority = evaluateLocationPriority(profile, job);
     const isLive = job.liveness_status === 'live';
 
-    let rawScore = Math.round(cvMatch.score * 0.65 + (isLive ? 15 : 0) + (visaMentioned ? 10 : 4) + (inPreferredCity ? 12 : isRemote ? 8 : 0) + boost);
+    let rawScore = Math.round(
+      cvMatch.score * 0.6 +
+        (isLive ? 14 : 0) +
+        (locPriority.hasVisa ? 6 : 0) +
+        (locPriority.hasAccommodation ? 4 : 0) +
+        locPriority.scoreBonus +
+        boost
+    );
     if (!constraintPass) rawScore = Math.max(15, rawScore - 28);
     if (isDismissed) rawScore = Math.max(10, rawScore - 18);
     const finalScore = Math.max(10, Math.min(98, rawScore));
 
     const eligibleForDaily = !isDismissed && isLive && constraintPass && job.authenticity_status !== 'suspicious';
     const advocate =
-      cvMatch.matchedSkills.length >= 2
-        ? 'Software & Systems Agent'
-        : visaMentioned
-          ? 'Visa & Relocation Advocate'
+      locPriority.tier <= 2
+        ? 'Visa & Relocation Advocate'
+        : cvMatch.matchedSkills.length >= 2
+          ? 'Software & Systems Agent'
           : 'Quality & Operations Agent';
 
     const verdict = isDismissed
@@ -872,9 +992,13 @@ export function runJuryDeliberation(
         ? 'Eliminated during cross-examination because it violates your seniority, skill, or role-track exclusions.'
         : !isLive
           ? 'Posting reachability could not be confirmed today. Excluded from the top 5.'
-          : visaMentioned
-            ? 'Strong alignment with visa/mobility signals present. Prioritize for shortlist and tailored application.'
-            : 'Suitable for your active pipeline. Confirm visa/relocation support during initial recruiter outreach.';
+          : locPriority.tier === 1
+            ? `Priority Tier 1: Located in your current city (${profile.residence || preferredCity}). Ranked first.`
+            : locPriority.tier === 2
+              ? 'Priority Tier 2: Relocating city/country with both visa and accommodation/relocation support verified.'
+              : locPriority.hasVisa
+                ? 'Visa signals present, though accommodation is not explicitly confirmed.'
+                : 'Other location without confirmed visa & accommodation; ranked behind local and full-relocation roles.';
 
     const args = [
       {
@@ -912,23 +1036,29 @@ export function runJuryDeliberation(
       },
       {
         agent_name: 'Visa & Relocation Advocate',
-        agent_role: 'Immigration & Mobility Counsel',
+        agent_role: 'Immigration & Accommodation Counsel',
         argument_type: 'endorsement',
-        statement: visaMentioned
-          ? `Mobility signals detected for ${job.company}: ${job.visa_evidence}.`
-          : `Proceed with clarity: ${job.company} does not explicitly advertise sponsorship in the scraped text (${job.visa_evidence || 'Not verified'}).`,
-        score: visaMentioned ? 82 : 40,
+        statement:
+          locPriority.hasVisa && locPriority.hasAccommodation
+            ? `Both visa and accommodation/relocation support detected for ${job.company} (${job.visa_evidence}; ${job.housing_evidence}). Qualifies for Priority Tier 2.`
+            : locPriority.hasVisa
+              ? `Visa signals detected (${job.visa_evidence}), but accommodation/housing support is not explicitly stated (${job.housing_evidence || 'Not verified'}).`
+              : `No confirmed visa & accommodation package in the scraped text (${job.visa_evidence || 'Not verified'}).`,
+        score: locPriority.hasVisa && locPriority.hasAccommodation ? 95 : locPriority.hasVisa ? 68 : 35,
       },
       {
         agent_name: 'City Preference Examiner',
-        agent_role: 'Candidate Location Priority',
+        agent_role: 'Location & Mobility Priority',
         argument_type: 'location_preference',
-        statement: inPreferredCity
-          ? `Listed in preferred city (${profile.residence}). Ranked with local priority.`
-          : isRemote
-            ? 'Remote-eligible role; remains fully eligible in cross-location pipeline.'
-            : `Not listed in ${profile.residence || 'preferred city'}. Kept eligible as an international/relocation fallback.`,
-        score: inPreferredCity ? 95 : isRemote ? 75 : 50,
+        statement:
+          locPriority.tier === 1
+            ? `Priority Tier 1: Listed in your current location (${profile.residence}). Ranked first ahead of relocating roles.`
+            : locPriority.tier === 2
+              ? `Priority Tier 2: Located in another city/country (${job.location}) and provides both visa and accommodation/relocation support.`
+              : locPriority.isRemote
+                ? 'Priority Tier 3: Remote-eligible role; ranked behind local and full visa+accommodation opportunities.'
+                : `Priority Tier ${locPriority.tier}: Located outside ${profile.residence || 'current location'} without full visa & accommodation confirmation; ranked lower.`,
+        score: locPriority.tier === 1 ? 100 : locPriority.tier === 2 ? 86 : locPriority.isRemote ? 68 : 38,
       },
     ];
 
@@ -945,6 +1075,7 @@ export function runJuryDeliberation(
     evaluated.push({
       job,
       finalScore,
+      locationTier: locPriority.tier,
       advocate,
       verdict,
       recommendation,
@@ -955,6 +1086,7 @@ export function runJuryDeliberation(
 
   evaluated.sort((a, b) => {
     if (a.eligibleForDaily !== b.eligibleForDaily) return a.eligibleForDaily ? -1 : 1;
+    if (a.locationTier !== b.locationTier) return a.locationTier - b.locationTier;
     return b.finalScore - a.finalScore;
   });
 
@@ -994,6 +1126,7 @@ export function runJuryDeliberation(
         isPick,
         item.advocate,
         finalVerdict,
+        item.locationTier,
         item.job.id
       );
 
@@ -1062,7 +1195,7 @@ export function recalibrateScoresFromWeights(
     weightMap.set(`${row.feature_type}::${row.feature_value}`, row.score_delta);
   }
 
-  const scored: Array<{ id: string; finalScore: number; eligible: boolean }> = [];
+  const scored: Array<{ id: string; finalScore: number; locationTier: number; eligible: boolean }> = [];
   for (const job of jobs) {
     const titleLower = (job.title || '').toLowerCase();
     const descLower = (job.description || '').toLowerCase();
@@ -1086,16 +1219,15 @@ export function recalibrateScoresFromWeights(
     if (profile.experience_level === 'entry-level' && isSenior) constraintPass = false;
     else if (hasExcludedSkill || hasExcludedTerm || isSaudiOnly) constraintPass = false;
 
-    const inPreferredCity = Boolean(preferredCity && (job.location || '').toLowerCase().includes(preferredCity));
-    const isRemote = (job.location || '').toLowerCase().includes('remote');
-    const visaMentioned = (job.visa_evidence || '').toLowerCase().includes('mentioned');
+    const locPriority = evaluateLocationPriority(profile, job);
     const isLive = job.liveness_status === 'live';
 
     let rawScore = Math.round(
-      cvMatch.score * 0.65 +
-        (isLive ? 15 : 0) +
-        (visaMentioned ? 10 : 4) +
-        (inPreferredCity ? 12 : isRemote ? 8 : 0) +
+      cvMatch.score * 0.6 +
+        (isLive ? 14 : 0) +
+        (locPriority.hasVisa ? 6 : 0) +
+        (locPriority.hasAccommodation ? 4 : 0) +
+        locPriority.scoreBonus +
         boost
     );
     if (!constraintPass) rawScore = Math.max(15, rawScore - 28);
@@ -1103,21 +1235,24 @@ export function recalibrateScoresFromWeights(
     const finalScore = Math.max(10, Math.min(98, rawScore));
 
     const eligible = !isDismissed && isLive && constraintPass && job.authenticity_status !== 'suspicious';
-    scored.push({ id: job.id, finalScore, eligible });
+    scored.push({ id: job.id, finalScore, locationTier: locPriority.tier, eligible });
   }
 
   scored.sort((a, b) => {
     if (a.eligible !== b.eligible) return a.eligible ? -1 : 1;
+    if (a.locationTier !== b.locationTier) return a.locationTier - b.locationTier;
     return b.finalScore - a.finalScore;
   });
 
   const pickIds = new Set(scored.filter((s) => s.eligible).slice(0, 5).map((s) => s.id));
-  const updateStmt = db.prepare('UPDATE jobs SET jury_score=?, score=?, is_daily_pick=? WHERE id=?');
+  const updateStmt = db.prepare(
+    'UPDATE jobs SET jury_score=?, score=?, is_daily_pick=?, location_priority_tier=? WHERE id=?'
+  );
 
   db.exec('BEGIN');
   try {
     for (const s of scored) {
-      updateStmt.run(s.finalScore, s.finalScore, pickIds.has(s.id) ? 1 : 0, s.id);
+      updateStmt.run(s.finalScore, s.finalScore, pickIds.has(s.id) ? 1 : 0, s.locationTier, s.id);
     }
     db.exec('COMMIT');
   } catch (err) {

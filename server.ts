@@ -13,6 +13,7 @@ import {
   analyzeCv,
   buildDocxBuffer,
   computeLearnedBoost,
+  evaluateLocationPriority,
   generateApplicationMaterials,
   googleCareersSearchUrl,
   parseCvSections,
@@ -22,7 +23,7 @@ import {
   runJuryDeliberation,
   sanitizeCvText,
 } from './server/agentEngine.ts';
-import { syncAllJobSources } from './server/jobSources.ts';
+import { extractSalaryInfo, syncAllJobSources } from './server/jobSources.ts';
 import type {
   AgentArgument,
   ApplicationDraft,
@@ -88,9 +89,48 @@ function ensureSchema() {
       PRIMARY KEY (feature_type, feature_value)
     );
   `);
+
+  const existingCols = new Set(
+    (db.prepare('PRAGMA table_info(jobs)').all() as Array<{ name: string }>).map((c) => c.name)
+  );
+  if (!existingCols.has('salary_min')) {
+    db.exec('ALTER TABLE jobs ADD COLUMN salary_min INTEGER;');
+  }
+  if (!existingCols.has('salary_max')) {
+    db.exec('ALTER TABLE jobs ADD COLUMN salary_max INTEGER;');
+  }
+  if (!existingCols.has('salary_currency')) {
+    db.exec('ALTER TABLE jobs ADD COLUMN salary_currency TEXT;');
+  }
+  if (!existingCols.has('location_priority_tier')) {
+    db.exec('ALTER TABLE jobs ADD COLUMN location_priority_tier INTEGER DEFAULT 4;');
+  }
 }
 
 ensureSchema();
+
+function backfillJobSalaries() {
+  const rows = db
+    .prepare('SELECT id, description FROM jobs WHERE salary_min IS NULL AND salary_max IS NULL')
+    .all() as Array<{ id: string; description: string | null }>;
+  if (!rows.length) return;
+  const stmt = db.prepare('UPDATE jobs SET salary_min=?, salary_max=?, salary_currency=? WHERE id=?');
+  db.exec('BEGIN');
+  try {
+    for (const r of rows) {
+      const sal = extractSalaryInfo(r.description || '');
+      if (sal.salary_min !== null || sal.salary_max !== null) {
+        stmt.run(sal.salary_min, sal.salary_max, sal.salary_currency, r.id);
+      }
+    }
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+}
+
+backfillJobSalaries();
 
 function getProfileRow(): CandidateProfile {
   const row = db.prepare('SELECT * FROM profile WHERE id=1').get() as Record<string, unknown> | undefined;
@@ -308,11 +348,165 @@ function getJuryDecisionHistory() {
   }));
 }
 
-function enrichJob(job: JobItem): JobItem {
+function getDailyDigest() {
+  const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+  const recentDelibs = db
+    .prepare('SELECT * FROM deliberations ORDER BY created_at DESC LIMIT 10')
+    .all() as unknown as DeliberationSession[];
+
+  const nowMs = Date.now();
+  const within24h = recentDelibs.filter((d) => {
+    const t = Date.parse(d.created_at);
+    return !Number.isNaN(t) && nowMs - t <= TWENTY_FOUR_HOURS_MS;
+  });
+
+  const targetDelibs = within24h.length > 0 ? within24h : recentDelibs.slice(0, 1);
+  const primaryDelib = targetDelibs[0] || null;
+  const delibIds = targetDelibs.map((d) => d.id);
+
+  let reviewedCount = 0;
+  let digestRows: Array<{
+    job: JobItem;
+    consensus_score: number;
+    verdict: string;
+    strengths: string | null;
+    recommendation: string | null;
+  }> = [];
+
+  const primaryDelibId = primaryDelib?.id || null;
+  if (primaryDelibId && delibIds.length > 0) {
+    const placeholders = delibIds.map(() => '?').join(',');
+    const countRow = db
+      .prepare(`SELECT COUNT(DISTINCT job_id) as c FROM jury_verdicts WHERE deliberation_id IN (${placeholders})`)
+      .get(...delibIds) as { c: number };
+    reviewedCount = Number(countRow?.c || 0);
+
+    const joined = db
+      .prepare(
+        `SELECT j.*, v.consensus_score as v_consensus_score, v.verdict as v_verdict,
+                v.strengths as v_strengths, v.recommendation as v_recommendation,
+                v.deliberation_id as v_delib_id
+         FROM jury_verdicts v
+         INNER JOIN jobs j ON j.id = v.job_id
+         WHERE v.deliberation_id IN (${placeholders})
+           AND j.status != 'dismissed'
+           AND ${NOT_EXPIRED_LIVENESS_SQL}
+         ORDER BY CASE WHEN v.deliberation_id = ? THEN 0 ELSE 1 END ASC,
+                  j.is_daily_pick DESC,
+                  COALESCE(j.location_priority_tier, 4) ASC,
+                  j.jury_score DESC,
+                  v.consensus_score DESC,
+                  v.id DESC`
+      )
+      .all(...delibIds, primaryDelibId) as unknown as Array<
+      JobItem & {
+        v_consensus_score: number;
+        v_verdict: string;
+        v_strengths: string | null;
+        v_recommendation: string | null;
+        v_delib_id: string;
+      }
+    >;
+
+    const seenJobs = new Set<string>();
+    for (const row of joined) {
+      if (seenJobs.has(row.id)) continue;
+      seenJobs.add(row.id);
+      const { v_consensus_score, v_verdict, v_strengths, v_recommendation, v_delib_id: _d, ...jobFields } = row;
+      digestRows.push({
+        job: jobFields as JobItem,
+        consensus_score: Number(jobFields.jury_score || v_consensus_score || jobFields.score || 0),
+        verdict: String(v_verdict || jobFields.jury_verdict || 'APPROVED'),
+        strengths: v_strengths || null,
+        recommendation: v_recommendation || null,
+      });
+      if (digestRows.length >= 3) break;
+    }
+  }
+
+  if (digestRows.length < 3) {
+    const excludeIds = new Set(digestRows.map((d) => d.job.id));
+    const fallbackJobs = db
+      .prepare(
+        `SELECT * FROM jobs
+         WHERE status != 'dismissed' AND ${NOT_EXPIRED_LIVENESS_SQL}
+         ORDER BY is_daily_pick DESC, COALESCE(location_priority_tier, 4) ASC, jury_score DESC, score DESC
+         LIMIT 10`
+      )
+      .all() as unknown as JobItem[];
+
+    for (const fj of fallbackJobs) {
+      if (excludeIds.has(fj.id)) continue;
+      excludeIds.add(fj.id);
+      digestRows.push({
+        job: fj,
+        consensus_score: Number(fj.jury_score || fj.score || 0),
+        verdict: fj.jury_verdict || 'HIGH AFFINITY',
+        strengths: null,
+        recommendation: null,
+      });
+      if (digestRows.length >= 3) break;
+    }
+  }
+
+  const argStmt = db.prepare(
+    `SELECT agent_name, agent_role, statement
+     FROM agent_arguments
+     WHERE job_id = ?
+     ORDER BY score DESC, id DESC
+     LIMIT 1`
+  );
+
+  const digestProfile = getProfileRow();
+  const items = digestRows
+    .map((entry) => {
+      const enriched = enrichJob(entry.job, digestProfile);
+      const arg = argStmt.get(enriched.id) as
+        | { agent_name?: string; agent_role?: string; statement?: string }
+        | undefined;
+
+      return {
+        job: enriched,
+        consensusScore: entry.consensus_score,
+        verdict: entry.verdict,
+        strengths: entry.strengths,
+        recommendation: entry.recommendation,
+        advocateName: arg?.agent_name || enriched.advocate_agent || 'Supreme Jury',
+        advocateRole: arg?.agent_role || 'Multi-Agent Consensus',
+        advocateStatement:
+          arg?.statement ||
+          entry.strengths ||
+          'High profile & skill alignment verified across active postings.',
+      };
+    })
+    .sort((a, b) => {
+      const pickDiff = (b.job.is_daily_pick ? 1 : 0) - (a.job.is_daily_pick ? 1 : 0);
+      if (pickDiff !== 0) return pickDiff;
+      const tierDiff = (a.job.location_priority_tier ?? 4) - (b.job.location_priority_tier ?? 4);
+      if (tierDiff !== 0) return tierDiff;
+      return b.consensusScore - a.consensusScore;
+    });
+
+  return {
+    cycleDate: primaryDelib?.session_date || new Date().toISOString().slice(0, 10),
+    cycleTimestamp: primaryDelib?.created_at || new Date().toISOString(),
+    withinLast24Hours: within24h.length > 0,
+    reviewedCount: reviewedCount || getStats().activeCount,
+    cycleSummary:
+      primaryDelib?.summary ||
+      'Agents evaluated active postings for technical alignment, reachability, and visa evidence.',
+    items,
+  };
+}
+
+function enrichJob(job: JobItem, profileArg?: CandidateProfile): JobItem {
   const { boost, reasons } = computeLearnedBoost(db, job);
   const appRow = db.prepare('SELECT id FROM applications WHERE job_id=? LIMIT 1').get(job.id);
+  const locPriority = evaluateLocationPriority(profileArg || getProfileRow(), job);
   return {
     ...job,
+    location_priority_tier: locPriority.tier,
+    location_priority_label: locPriority.label,
     learned_boost: boost,
     learned_reasons: reasons,
     has_application: Boolean(appRow),
@@ -354,11 +548,17 @@ app.get('/api/health', (_req: Request, res: Response) => {
   res.json({ ok: true, ...stats });
 });
 
+const SALARY_SLIDER_MAX = 250000;
+
 app.get('/api/dashboard', (req: Request, res: Response) => {
   const status = String(req.query.status || 'all');
   const q = String(req.query.q || '').trim();
   const source = String(req.query.source || 'all');
   const liveness = String(req.query.liveness || 'all');
+  const minSalary = Math.max(0, Number(req.query.minSalary || 0) || 0);
+  const rawMax = Number(req.query.maxSalary);
+  const maxSalary = Number.isFinite(rawMax) && rawMax > 0 ? Math.min(SALARY_SLIDER_MAX, rawMax) : SALARY_SLIDER_MAX;
+  const includeUndisclosed = String(req.query.includeUndisclosed || 'false') === 'true';
   const page = Math.max(1, Number(req.query.page || 1));
   const limit = Math.min(50, Math.max(10, Number(req.query.limit || 20)));
   const offset = (page - 1) * limit;
@@ -397,6 +597,25 @@ app.get('/api/dashboard', (req: Request, res: Response) => {
     params.push(like, like, like, like);
   }
 
+  const salaryActive = minSalary > 0 || maxSalary < SALARY_SLIDER_MAX;
+  if (salaryActive) {
+    const overlapParts: string[] = [];
+    if (minSalary > 0) {
+      overlapParts.push('salary_max >= ?');
+      params.push(minSalary);
+    }
+    if (maxSalary < SALARY_SLIDER_MAX) {
+      overlapParts.push('salary_min <= ?');
+      params.push(maxSalary);
+    }
+    const overlapExpr = `(${overlapParts.join(' AND ')})`;
+    if (includeUndisclosed) {
+      whereParts.push(`((salary_min IS NULL AND salary_max IS NULL) OR (salary_min IS NOT NULL AND ${overlapExpr}))`);
+    } else {
+      whereParts.push(`(salary_min IS NOT NULL AND ${overlapExpr})`);
+    }
+  }
+
   const whereClause = whereParts.length ? `WHERE ${whereParts.join(' AND ')}` : '';
 
   const totalRow = db
@@ -407,7 +626,7 @@ app.get('/api/dashboard', (req: Request, res: Response) => {
   const jobsRows = db
     .prepare(
       `SELECT * FROM jobs ${whereClause}
-       ORDER BY is_daily_pick DESC, jury_score DESC, score DESC, created_at DESC
+       ORDER BY is_daily_pick DESC, COALESCE(location_priority_tier, 4) ASC, jury_score DESC, score DESC, created_at DESC
        LIMIT ? OFFSET ?`
     )
     .all(...params, limit, offset) as unknown as JobItem[];
@@ -415,7 +634,7 @@ app.get('/api/dashboard', (req: Request, res: Response) => {
   const dailyPickRows = db
     .prepare(
       `SELECT * FROM jobs WHERE is_daily_pick = 1 AND status != 'dismissed' AND ${NOT_EXPIRED_LIVENESS_SQL}
-       ORDER BY jury_score DESC, score DESC LIMIT 5`
+       ORDER BY COALESCE(location_priority_tier, 4) ASC, jury_score DESC, score DESC LIMIT 5`
     )
     .all() as unknown as JobItem[];
 
@@ -423,12 +642,35 @@ app.get('/api/dashboard', (req: Request, res: Response) => {
     .prepare('SELECT * FROM deliberations ORDER BY created_at DESC LIMIT 1')
     .get() || null) as unknown as DeliberationSession | null;
 
+  const salaryAgg = db
+    .prepare(
+      `SELECT COUNT(*) as disclosedCount,
+              COALESCE(MIN(salary_min), 0) as minAvailable,
+              COALESCE(MAX(salary_max), 250000) as maxAvailable
+       FROM jobs
+       WHERE status != 'dismissed' AND (status = 'applied' OR ${NOT_EXPIRED_LIVENESS_SQL}) AND salary_min IS NOT NULL`
+    )
+    .get() as { disclosedCount: number; minAvailable: number; maxAvailable: number };
+
   const profile = getProfileRow();
+  const enrichedDailyPicks = dailyPickRows
+    .map((job) => enrichJob(job, profile))
+    .sort((a, b) => {
+      const tierDiff = (a.location_priority_tier ?? 4) - (b.location_priority_tier ?? 4);
+      if (tierDiff !== 0) return tierDiff;
+      return (b.jury_score || 0) - (a.jury_score || 0);
+    });
 
   res.json({
     stats: getStats(),
-    dailyPicks: dailyPickRows.map(enrichJob),
-    jobs: jobsRows.map(enrichJob),
+    salaryStats: {
+      disclosedCount: Number(salaryAgg.disclosedCount || 0),
+      minAvailable: Number(salaryAgg.minAvailable || 0),
+      maxAvailable: Number(salaryAgg.maxAvailable || 250000),
+    },
+    dailyPicks: enrichedDailyPicks,
+    dailyDigest: getDailyDigest(),
+    jobs: jobsRows.map((job) => enrichJob(job, profile)),
     pagination: {
       page,
       limit,
@@ -1210,6 +1452,7 @@ function ensureDaily24hDeliberation() {
 }
 
 async function startServer() {
+  recalibrateScoresFromWeights(db, getProfileRow());
   ensureDaily24hDeliberation();
   // Kick off initial background source sync if only a few boards are present
   const sourceCount = Number((db.prepare('SELECT COUNT(DISTINCT source) as c FROM jobs').get() as { c: number }).c);

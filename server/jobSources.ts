@@ -15,6 +15,104 @@ interface NormalizedJob {
   authenticity_status: string;
   authenticity_evidence: string;
   posted_date: string;
+  salary_min: number | null;
+  salary_max: number | null;
+  salary_currency: string | null;
+}
+
+export interface SalaryInfo {
+  salary_min: number | null;
+  salary_max: number | null;
+  salary_currency: string | null;
+}
+
+function normalizeCurrencyCode(raw?: unknown): string | null {
+  const s = String(raw || '').trim().toUpperCase();
+  if (!s) return null;
+  if (s === '$' || s === 'USD' || s === 'US$') return 'USD';
+  if (s === '€' || s === 'EUR') return 'EUR';
+  if (s === '£' || s === 'GBP') return 'GBP';
+  if (s === 'CAD' || s === 'C$') return 'CAD';
+  if (s === 'AUD' || s === 'A$') return 'AUD';
+  if (/^[A-Z]{3}$/.test(s)) return s;
+  return null;
+}
+
+function parseSalaryToken(rawToken?: string): number | null {
+  if (!rawToken) return null;
+  const cleaned = rawToken.trim().toLowerCase();
+  const hasK = cleaned.endsWith('k');
+  const numStr = cleaned.replace(/k$/i, '').replace(/,/g, '');
+  // Handle European thousand separator like 70.000
+  const normalized = /^\d{2,3}\.\d{3}$/.test(numStr) ? numStr.replace('.', '') : numStr;
+  const num = Number(normalized);
+  if (!Number.isFinite(num) || num <= 0) return null;
+  const scaled = hasK ? num * 1000 : num;
+  if (scaled < 15000 || scaled > 500000) return null;
+  return Math.round(scaled);
+}
+
+export function extractSalaryInfo(
+  text: string,
+  hints?: { min?: unknown; max?: unknown; currency?: unknown; salaryText?: unknown }
+): SalaryInfo {
+  const hintCurr = normalizeCurrencyCode(hints?.currency);
+  const rawMin = Number(hints?.min);
+  const rawMax = Number(hints?.max);
+
+  if (Number.isFinite(rawMin) && rawMin >= 15000 && rawMin <= 500000) {
+    const min = Math.round(rawMin);
+    const max =
+      Number.isFinite(rawMax) && rawMax >= min && rawMax <= 500000
+        ? Math.round(rawMax)
+        : min;
+    return {
+      salary_min: min,
+      salary_max: max,
+      salary_currency: hintCurr || 'USD',
+    };
+  }
+
+  if (Number.isFinite(rawMax) && rawMax >= 15000 && rawMax <= 500000) {
+    const max = Math.round(rawMax);
+    return {
+      salary_min: max,
+      salary_max: max,
+      salary_currency: hintCurr || 'USD',
+    };
+  }
+
+  const combined = `${hints?.salaryText ? `${String(hints.salaryText)} ` : ''}${text || ''}`;
+
+  const currencyPrefixRx =
+    /(USD|EUR|GBP|CAD|AUD|\$|€|£)\s?(\d{2,3}(?:[,.]\d{3})+|\d{2,3}\s?[kK])(?:\s*(?:-|–|—|to)\s*(?:USD|EUR|GBP|CAD|AUD|\$|€|£)?\s*(\d{2,3}(?:[,.]\d{3})+|\d{2,3}\s?[kK]))?(?!\s?(?:M|B|million|billion|mn|bn)\b)/i;
+  const m1 = combined.match(currencyPrefixRx);
+  if (m1) {
+    const curr = normalizeCurrencyCode(m1[1]) || hintCurr || 'USD';
+    const v1 = parseSalaryToken(m1[2]);
+    const v2 = parseSalaryToken(m1[3]);
+    if (v1 !== null) {
+      const min = v2 !== null ? Math.min(v1, v2) : v1;
+      const max = v2 !== null ? Math.max(v1, v2) : v1;
+      return { salary_min: min, salary_max: max, salary_currency: curr };
+    }
+  }
+
+  const suffixRx =
+    /(?:salary|compensation|pay|base|ote|gross|brutto)[^.\n]{0,35}?(\d{2,3}\s?[kK])\s*(?:-|–|—|to)\s*(\d{2,3}\s?[kK])\s*(USD|EUR|GBP|CAD|AUD|\$|€|£)?/i;
+  const m2 = combined.match(suffixRx);
+  if (m2) {
+    const v1 = parseSalaryToken(m2[1]);
+    const v2 = parseSalaryToken(m2[2]);
+    const curr = normalizeCurrencyCode(m2[3]) || hintCurr || 'USD';
+    if (v1 !== null) {
+      const min = v2 !== null ? Math.min(v1, v2) : v1;
+      const max = v2 !== null ? Math.max(v1, v2) : v1;
+      return { salary_min: min, salary_max: max, salary_currency: curr };
+    }
+  }
+
+  return { salary_min: null, salary_max: null, salary_currency: null };
 }
 
 const FETCH_TIMEOUT_MS = 5000;
@@ -47,8 +145,11 @@ function detectVisaEvidence(text: string): string {
 
 function detectHousingEvidence(text: string): string {
   const lower = (text || '').toLowerCase();
-  if (/housing allowance|accommodation provided|relocation stipend|temporary housing/i.test(lower)) {
-    return 'Housing / relocation stipend mentioned';
+  if (/housing allowance|housing provided|accommodation provided|staff accommodation|company accommodation|furnished apartment|temporary housing|relocation stipend|relocation package|relocation assistance|relocation allowance|relocation support/i.test(lower)) {
+    return 'Accommodation / relocation package mentioned';
+  }
+  if (/accommodation|housing/i.test(lower)) {
+    return 'Accommodation terms mentioned';
   }
   return 'Standard compensation only';
 }
@@ -145,6 +246,7 @@ async function fetchGoogleCareers(): Promise<NormalizedJob[]> {
           authenticity_status: 'likely_official',
           authenticity_evidence: 'Direct official Google Careers requisition feed.',
           posted_date: formatPostedDate(nowIso),
+          ...extractSalaryInfo(description),
         });
       }
     } catch {
@@ -186,6 +288,11 @@ async function fetchHimalayas(): Promise<NormalizedJob[]> {
         authenticity_status: 'unverified',
         authenticity_evidence: 'Indexed from Himalayas Remote Job Feed.',
         posted_date: formatPostedDate(j.pubDate as string | number | undefined),
+        ...extractSalaryInfo(desc, {
+          min: j.minSalary,
+          max: j.maxSalary,
+          currency: j.currency,
+        }),
       };
     });
 }
@@ -219,6 +326,11 @@ async function fetchJobicy(): Promise<NormalizedJob[]> {
         authenticity_status: 'unverified',
         authenticity_evidence: 'Indexed from Jobicy Remote API.',
         posted_date: formatPostedDate(j.pubDate as string | undefined),
+        ...extractSalaryInfo(desc, {
+          min: j.annualSalaryMin,
+          max: j.annualSalaryMax,
+          currency: j.salaryCurrency,
+        }),
       };
     });
 }
@@ -251,6 +363,11 @@ async function fetchRemoteOK(): Promise<NormalizedJob[]> {
         authenticity_status: 'unverified',
         authenticity_evidence: 'Indexed from RemoteOK Live API.',
         posted_date: formatPostedDate(j.date as string | undefined),
+        ...extractSalaryInfo(desc, {
+          min: j.salary_min,
+          max: j.salary_max,
+          currency: 'USD',
+        }),
       };
     });
 }
@@ -286,6 +403,7 @@ async function fetchWorkingNomads(): Promise<NormalizedJob[]> {
         authenticity_status: 'unverified',
         authenticity_evidence: 'Indexed from WorkingNomads Exposed Jobs API.',
         posted_date: formatPostedDate(j.pub_date as string | undefined),
+        ...extractSalaryInfo(desc),
       };
     });
 }
@@ -326,6 +444,7 @@ async function fetchGreenhouseBoards(): Promise<NormalizedJob[]> {
             authenticity_status: 'likely_official',
             authenticity_evidence: `Direct ${b.company} Greenhouse ATS careers board.`,
             posted_date: formatPostedDate(j.updated_at as string | undefined),
+            ...extractSalaryInfo(desc),
           } satisfies NormalizedJob;
         });
     })
@@ -370,6 +489,7 @@ async function fetchAshbyBoards(): Promise<NormalizedJob[]> {
             authenticity_status: 'likely_official',
             authenticity_evidence: `Direct ${b.company} Ashby HQ ATS board.`,
             posted_date: formatPostedDate(j.publishedAt as string | undefined),
+            ...extractSalaryInfo(desc),
           } satisfies NormalizedJob;
         });
     })
@@ -407,6 +527,7 @@ async function fetchArbeitnow(): Promise<NormalizedJob[]> {
         authenticity_status: 'unverified',
         authenticity_evidence: 'Indexed from Arbeitnow Live Job Board API.',
         posted_date: formatPostedDate(j.created_at as number | string | undefined),
+        ...extractSalaryInfo(desc),
       };
     });
 }
@@ -440,6 +561,7 @@ async function fetchRemotive(): Promise<NormalizedJob[]> {
         authenticity_status: 'unverified',
         authenticity_evidence: 'Indexed from Remotive Remote Jobs API.',
         posted_date: formatPostedDate(j.publication_date as string | undefined),
+        ...extractSalaryInfo(desc, { salaryText: j.salary }),
       };
     });
 }
@@ -476,8 +598,9 @@ export async function syncAllJobSources(db: DatabaseSync): Promise<SourceSyncSum
     INSERT INTO jobs (
       id, title, company, location, url, source, description,
       visa_evidence, housing_evidence, liveness_status, liveness_checked_at,
-      authenticity_status, authenticity_evidence, posted_date, status, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?)
+      authenticity_status, authenticity_evidence, posted_date,
+      salary_min, salary_max, salary_currency, status, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?)
     ON CONFLICT(id) DO UPDATE SET
       title = excluded.title,
       company = excluded.company,
@@ -491,7 +614,10 @@ export async function syncAllJobSources(db: DatabaseSync): Promise<SourceSyncSum
       liveness_checked_at = excluded.liveness_checked_at,
       authenticity_status = excluded.authenticity_status,
       authenticity_evidence = excluded.authenticity_evidence,
-      posted_date = excluded.posted_date
+      posted_date = excluded.posted_date,
+      salary_min = COALESCE(excluded.salary_min, jobs.salary_min),
+      salary_max = COALESCE(excluded.salary_max, jobs.salary_max),
+      salary_currency = COALESCE(excluded.salary_currency, jobs.salary_currency)
   `);
 
   let upsertedTotal = 0;
@@ -513,6 +639,9 @@ export async function syncAllJobSources(db: DatabaseSync): Promise<SourceSyncSum
         job.authenticity_status,
         job.authenticity_evidence,
         job.posted_date,
+        job.salary_min,
+        job.salary_max,
+        job.salary_currency,
         nowIso
       );
       bySource[job.source] = (bySource[job.source] || 0) + 1;
