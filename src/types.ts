@@ -53,6 +53,8 @@ export interface JobItem {
   salary_currency?: string | null;
   location_priority_tier?: number;
   location_priority_label?: string;
+  cv_score?: number;
+  seniority_blocked?: number;
   learned_boost?: number;
   learned_reasons?: string[];
   has_application?: boolean;
@@ -111,6 +113,8 @@ export interface DashboardStats {
   expiredCount: number;
   dismissedCount: number;
   liveCount: number;
+  matchedCount?: number;
+  seniorFilteredCount?: number;
   sources: Array<{ source: string; count: number }>;
 }
 
@@ -215,6 +219,7 @@ export interface SettingsResponse {
 
 export const REJECTION_REASONS: Record<string, string> = {
   seniority: 'Too senior / too much experience required',
+  language: 'Job language or fluency requirement is not suitable',
   skills: 'Skills or experience are not a good match',
   location: 'Location or relocation does not work for me',
   authorization: 'Work authorization or visa is unsuitable',

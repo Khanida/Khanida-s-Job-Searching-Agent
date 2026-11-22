@@ -19,6 +19,7 @@ export const EVENT_WEIGHTS: Record<string, number> = {
 
 export const REJECTION_REASON_LABELS: Record<string, string> = {
   seniority: 'Too senior / too much experience required',
+  language: 'Job language or fluency requirement is not suitable',
   skills: 'Skills or experience are not a good match',
   location: 'Location or relocation does not work for me',
   authorization: 'Work authorization or visa is unsuitable',
@@ -476,11 +477,695 @@ export function analyzeCv(cvText: string): CvAnalysis {
   };
 }
 
+interface LanguageSpec {
+  key: string;
+  label: string;
+  aliases: string[];
+  proseMarkers: string[];
+  titleMarkers?: string[];
+  scriptRx?: RegExp;
+}
+
+const LANGUAGE_SPECS: LanguageSpec[] = [
+  {
+    key: 'english',
+    label: 'English',
+    aliases: ['english', 'englisch', 'anglais', 'inglés', 'ingles'],
+    proseMarkers: [
+      'the', 'and', 'with', 'you', 'your', 'our', 'will', 'responsibilities',
+      'requirements', 'experience', 'team', 'software', 'role', 'candidate', 'qualifications',
+    ],
+  },
+  {
+    key: 'german',
+    label: 'German',
+    aliases: ['german', 'deutsch', 'deutschkenntnisse', 'allemand'],
+    proseMarkers: [
+      'und', 'oder', 'für', 'mit', 'bei', 'als', 'wir', 'sie', 'ihre', 'deine',
+      'einen', 'einer', 'eine', 'nicht', 'über', 'sowie', 'aufgaben', 'profil',
+      'kenntnisse', 'erfahrung', 'bereich', 'ab sofort', 'vollzeit', 'teilzeit',
+      'unbefristet', 'mitarbeiter', 'zusammenarbeit', 'bewerbung', 'standort',
+      'gerne', 'wünschenswert', 'voraussetzung', 'deutschkenntnisse',
+    ],
+    titleMarkers: [
+      'entwickler', 'werkstudent', 'praktikum', 'ausbildung', 'fachinformatiker',
+      'mitarbeiter', 'berater', 'projektleiter', 'sachbearbeiter', 'vertrieb',
+      'kaufmann', 'kauffrau', 'softwarearchitekt', 'systemadministrator',
+    ],
+  },
+  {
+    key: 'french',
+    label: 'French',
+    aliases: ['french', 'français', 'francais', 'französisch', 'franzoesisch'],
+    proseMarkers: [
+      'nous', 'vous', 'votre', 'notre', 'pour', 'avec', 'dans', 'une', 'des',
+      'missions', 'profil', 'compétences', 'expérience', 'poste', 'équipe',
+      'recherchons', 'maîtrise',
+    ],
+    titleMarkers: ['développeur', 'ingénieur', 'stagiaire', 'alternance', 'chef de projet'],
+  },
+  {
+    key: 'spanish',
+    label: 'Spanish',
+    aliases: ['spanish', 'español', 'espanol', 'spanisch', 'castellano'],
+    proseMarkers: [
+      'para', 'con', 'nuestro', 'equipo', 'buscamos', 'requisitos',
+      'responsabilidades', 'experiencia', 'conocimientos', 'puesto', 'trabajo',
+      'idioma', 'desarrollo',
+    ],
+    titleMarkers: ['desarrollador', 'ingeniero', 'becario', 'prácticas'],
+  },
+  {
+    key: 'dutch',
+    label: 'Dutch',
+    aliases: ['dutch', 'nederlands', 'niederländisch', 'niederlaendisch'],
+    proseMarkers: [
+      'wij', 'jij', 'jouw', 'voor', 'met', 'een', 'zijn', 'werken', 'functie',
+      'ervaring', 'werkzaamheden', 'kennis', 'beheersing', 'team',
+    ],
+    titleMarkers: ['ontwikkelaar', 'stagiair', 'medewerker'],
+  },
+  {
+    key: 'italian',
+    label: 'Italian',
+    aliases: ['italian', 'italiano', 'italienisch'],
+    proseMarkers: [
+      'per', 'con', 'il', 'nostro', 'cerchiamo', 'requisiti', 'mansioni',
+      'esperienza', 'competenze', 'lavoro', 'conoscenza',
+    ],
+    titleMarkers: ['sviluppatore', 'ingegnere'],
+  },
+  {
+    key: 'portuguese',
+    label: 'Portuguese',
+    aliases: ['portuguese', 'português', 'portugues', 'portugiesisch'],
+    proseMarkers: [
+      'para', 'com', 'nosso', 'vaga', 'requisitos', 'responsabilidades',
+      'experiência', 'conhecimento', 'trabalho',
+    ],
+    titleMarkers: ['desenvolvedor', 'engenheiro', 'estágio'],
+  },
+  {
+    key: 'arabic',
+    label: 'Arabic',
+    aliases: ['arabic', 'arabisch', 'العربية'],
+    proseMarkers: [],
+    scriptRx: /[\u0600-\u06FF]/g,
+  },
+  {
+    key: 'urdu',
+    label: 'Urdu',
+    aliases: ['urdu'],
+    proseMarkers: [],
+  },
+  {
+    key: 'hindi',
+    label: 'Hindi',
+    aliases: ['hindi'],
+    proseMarkers: [],
+  },
+  {
+    key: 'turkish',
+    label: 'Turkish',
+    aliases: ['turkish', 'türkisch', 'turkce'],
+    proseMarkers: [],
+  },
+  {
+    key: 'polish',
+    label: 'Polish',
+    aliases: ['polish', 'polnisch', 'polski'],
+    proseMarkers: [],
+  },
+  {
+    key: 'swedish',
+    label: 'Swedish',
+    aliases: ['swedish', 'svenska', 'schwedisch'],
+    proseMarkers: [],
+  },
+  {
+    key: 'norwegian',
+    label: 'Norwegian',
+    aliases: ['norwegian', 'norsk', 'norwegisch'],
+    proseMarkers: [],
+  },
+  {
+    key: 'danish',
+    label: 'Danish',
+    aliases: ['danish', 'dansk', 'dänisch'],
+    proseMarkers: [],
+  },
+  {
+    key: 'japanese',
+    label: 'Japanese',
+    aliases: ['japanese', 'japanisch', 'nihongo'],
+    proseMarkers: [],
+  },
+  {
+    key: 'mandarin',
+    label: 'Mandarin / Chinese',
+    aliases: ['mandarin', 'chinese', 'cantonese', 'chinesisch'],
+    proseMarkers: [],
+  },
+  {
+    key: 'korean',
+    label: 'Korean',
+    aliases: ['korean', 'koreanisch'],
+    proseMarkers: [],
+  },
+  {
+    key: 'russian',
+    label: 'Russian',
+    aliases: ['russian', 'russisch'],
+    proseMarkers: [],
+  },
+];
+
+const ALIAS_TO_LANG = new Map<string, string>();
+const LANG_KEY_TO_LABEL = new Map<string, string>();
+for (const spec of LANGUAGE_SPECS) {
+  LANG_KEY_TO_LABEL.set(spec.key, spec.label);
+  for (const alias of spec.aliases) {
+    ALIAS_TO_LANG.set(alias.toLowerCase(), spec.key);
+  }
+}
+
+function formatLanguageLabel(key: string): string {
+  return LANG_KEY_TO_LABEL.get(key) || (key ? key.charAt(0).toUpperCase() + key.slice(1) : 'Unknown');
+}
+
+function countMarkerHits(textLower: string, markers: string[]): number {
+  let count = 0;
+  for (const marker of markers) {
+    const escaped = escapeRegex(marker);
+    const rx = new RegExp(`(?:^|[^a-zà-öø-ÿ])${escaped}(?=$|[^a-zà-öø-ÿ])`, 'i');
+    if (rx.test(textLower)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function extractExplicitLanguageAliases(text: string): string[] {
+  const found: string[] = [];
+  const seen = new Set<string>();
+  const lower = (text || '').toLowerCase();
+  for (const [alias, langKey] of ALIAS_TO_LANG.entries()) {
+    const escaped = escapeRegex(alias);
+    const rx = new RegExp(`(?:^|[^a-zà-öø-ÿ])${escaped}(?=$|[^a-zà-öø-ÿ])`, 'i');
+    if (rx.test(lower) && !seen.has(langKey)) {
+      seen.add(langKey);
+      found.push(langKey);
+    }
+  }
+  return found;
+}
+
+export function detectProfileLanguages(
+  profile: Partial<CandidateProfile>
+): Map<string, 'fluent' | 'intermediate' | 'basic'> {
+  const langs = new Map<string, 'fluent' | 'intermediate' | 'basic'>();
+  const cvText = sanitizeCvText(profile.cv_text || '');
+  const lines = cvText.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+
+  let inLanguagesSection = false;
+  const languageSectionRx = /^(languages?|spoken\s+languages?|language\s+skills?|sprachen)\s*:?$/i;
+  const otherHeadingRx = /^(education|experience|work\s+experience|skills|technical\s+skills|projects|summary|profile|certifications?)\s*:?$/i;
+
+  for (const line of lines) {
+    const clean = line.replace(/[:\-–—]+$/, '').trim();
+    if (languageSectionRx.test(clean)) {
+      inLanguagesSection = true;
+      continue;
+    }
+    if (otherHeadingRx.test(clean)) {
+      inLanguagesSection = false;
+      continue;
+    }
+
+    const isInlineLangLine = /^(languages?|spoken\s+languages?|sprachen)\s*:/i.test(line);
+    const hasProficiencyToken = /\b(native|fluent|bilingual|proficient|mother\s+tongue|c1|c2|b1|b2|a1|a2|basic|elementary|intermediate|conversational|working\s+proficiency|muttersprache|fließend)\b/i.test(line);
+
+    if (inLanguagesSection || isInlineLangLine || hasProficiencyToken) {
+      const segments = line.split(/[,;|•/]+/).map((s) => s.trim()).filter(Boolean);
+      for (const seg of segments) {
+        const segLower = seg.toLowerCase();
+        for (const [alias, langKey] of ALIAS_TO_LANG.entries()) {
+          const escaped = escapeRegex(alias);
+          if (new RegExp(`(?:^|[^a-zà-öø-ÿ])${escaped}(?=$|[^a-zà-öø-ÿ])`, 'i').test(segLower)) {
+            const level: 'fluent' | 'intermediate' | 'basic' =
+              /\b(basic|beginner|elementary|a1|a2|limited)\b/i.test(segLower)
+                ? 'basic'
+                : /\b(intermediate|conversational|b1|b2)\b/i.test(segLower)
+                  ? 'intermediate'
+                  : 'fluent';
+            const prev = langs.get(langKey);
+            if (!prev || level === 'fluent' || (prev === 'basic' && level === 'intermediate')) {
+              langs.set(langKey, level);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // English is established if the CV/profile text is predominantly written in English (or CV text is blank)
+  const combinedProfileText = `${cvText} ${profile.degree || ''} ${profile.skills || ''} ${profile.target_roles || ''}`.toLowerCase();
+  const engHits = countMarkerHits(combinedProfileText, LANGUAGE_SPECS[0].proseMarkers);
+  if (!cvText.trim() || engHits >= 2 || combinedProfileText.trim().length > 0) {
+    if (!langs.has('english')) {
+      langs.set('english', 'fluent');
+    }
+  }
+
+  return langs;
+}
+
+export interface JobLanguageSignals {
+  postingLanguage: string;
+  requiredLanguages: string[];
+  preferredLanguages: string[];
+  strongFluencyLanguages: string[];
+}
+
+export function detectJobLanguageSignals(job: Partial<JobItem>): JobLanguageSignals {
+  const title = (job.title || '').trim();
+  const descClean = stripNoisyBoilerplate(job.description || '').replace(/<[^>]+>/g, ' ').trim();
+  const titleLower = title.toLowerCase();
+  const combinedLower = `${titleLower} ${descClean.toLowerCase()}`;
+
+  let postingLanguage = 'english';
+  const arabicMatches = combinedLower.match(/[\u0600-\u06FF]/g);
+  if (arabicMatches && arabicMatches.length >= 15) {
+    postingLanguage = 'arabic';
+  } else {
+    const englishHits = countMarkerHits(combinedLower, LANGUAGE_SPECS[0].proseMarkers);
+    let bestKey = 'english';
+    let bestScore = englishHits;
+
+    for (const spec of LANGUAGE_SPECS) {
+      if (spec.key === 'english' || spec.proseMarkers.length === 0) continue;
+      const hits = countMarkerHits(combinedLower, spec.proseMarkers);
+      const titleHits = spec.titleMarkers ? countMarkerHits(titleLower, spec.titleMarkers) : 0;
+      if ((hits >= 6 && hits >= englishHits * 0.55) || (titleHits >= 1 && hits >= 3)) {
+        const weighted = hits + titleHits * 3;
+        if (weighted > bestScore || (hits >= 7 && hits > bestScore * 0.7)) {
+          bestScore = weighted;
+          bestKey = spec.key;
+        }
+      }
+    }
+    postingLanguage = bestKey;
+  }
+
+  const requiredSet = new Set<string>();
+  const preferredSet = new Set<string>();
+  const strongFluencySet = new Set<string>();
+
+  if (postingLanguage !== 'english') {
+    requiredSet.add(postingLanguage);
+    strongFluencySet.add(postingLanguage);
+  }
+
+  const optionalCtxRx = /\b(not\s+required|not\s+mandatory|no\s+[a-z]+\s+required|isn't\s+required|optional|plus|bonus|nice\s+to\s+have|preferred|advantageous|beneficial|desirable|wünschenswert|von\s+vorteil)\b/i;
+  const allLangAliases = Array.from(ALIAS_TO_LANG.keys())
+    .sort((a, b) => b.length - a.length)
+    .map(escapeRegex)
+    .join('|');
+
+  const reqPatterns: Array<{ rx: RegExp; langGroup: number; strong: boolean }> = [
+    {
+      rx: new RegExp(
+        `\\b(fluent|native|business[- ]fluent|full\\s+professional|professional\\s+working|proficient|conversational|strong|excellent|c1|c2|b2|required|mandatory|essential|fließend|fliessend|verhandlungssicher|muttersprachlich)\\s+(?:command\\s+of\\s+|proficiency\\s+in\\s+|skills?\\s+in\\s+|knowledge\\s+of\\s+|level\\s+(?:of\\s+|in\\s+)?)?(${allLangAliases})\\b`,
+        'gi'
+      ),
+      langGroup: 2,
+      strong: true,
+    },
+    {
+      rx: new RegExp(
+        `\\b(${allLangAliases})\\s*(?:skills?|proficiency|fluency|knowledge|level|speaker|speaking)?\\s*(?:is|at|:|-|–|\\()?\\s*(?:level\\s*)?(c1|c2|b2|required|mandatory|essential|must|fluent|native|verhandlungssicher|fließend|fliessend|muttersprachlich|sehr\\s+gut)\\b`,
+        'gi'
+      ),
+      langGroup: 1,
+      strong: true,
+    },
+    {
+      rx: new RegExp(
+        `\\bmust\\s+speak\\s+(${allLangAliases})\\b`,
+        'gi'
+      ),
+      langGroup: 1,
+      strong: true,
+    },
+    {
+      rx: /\b(sehr\s+gute|fließende|fliessende|verhandlungssichere|gute)\s+(deutschkenntnisse|englischkenntnisse)\b/gi,
+      langGroup: 2,
+      strong: true,
+    },
+  ];
+
+  const sourceText = `${title}. ${descClean}`;
+  for (const { rx, langGroup } of reqPatterns) {
+    let m: RegExpExecArray | null;
+    while ((m = rx.exec(sourceText)) !== null) {
+      const matchedAlias = (m[langGroup] || '').toLowerCase();
+      const langKey =
+        matchedAlias === 'deutschkenntnisse'
+          ? 'german'
+          : matchedAlias === 'englischkenntnisse'
+            ? 'english'
+            : ALIAS_TO_LANG.get(matchedAlias);
+      if (!langKey) continue;
+
+      const ctxStart = Math.max(0, m.index - 45);
+      const ctxEnd = Math.min(sourceText.length, m.index + m[0].length + 55);
+      const contextWindow = sourceText.slice(ctxStart, ctxEnd);
+      if (optionalCtxRx.test(contextWindow)) {
+        preferredSet.add(langKey);
+      } else {
+        requiredSet.add(langKey);
+        if (/\b(fluent|native|business|c1|c2|verhandlungssicher|fließend|fliessend|muttersprachlich|sehr\s+gut|must\s+speak)\b/i.test(m[0])) {
+          strongFluencySet.add(langKey);
+        }
+      }
+    }
+  }
+
+  for (const lang of requiredSet) {
+    preferredSet.delete(lang);
+  }
+  if (!requiredSet.size) {
+    requiredSet.add(postingLanguage);
+  }
+
+  return {
+    postingLanguage,
+    requiredLanguages: Array.from(requiredSet),
+    preferredLanguages: Array.from(preferredSet),
+    strongFluencyLanguages: Array.from(strongFluencySet),
+  };
+}
+
+export interface LanguageAlignmentResult {
+  aligned: boolean;
+  severity: 'match' | 'optional' | 'mismatch';
+  postingLanguage: string;
+  requiredLanguages: string[];
+  preferredLanguages: string[];
+  missingLanguages: string[];
+  cvLanguages: string[];
+  learnedPenalizedLangs: string[];
+  score: number;
+  statement: string;
+}
+
+export function evaluateLanguageAlignment(
+  profile: Partial<CandidateProfile>,
+  job: Partial<JobItem>,
+  learnedWeightMap?: Map<string, number>
+): LanguageAlignmentResult {
+  const cvLangMap = detectProfileLanguages(profile);
+  const cvLanguages = Array.from(cvLangMap.keys()).map(formatLanguageLabel);
+  const signals = detectJobLanguageSignals(job);
+
+  const missingLanguages: string[] = [];
+  for (const reqLang of signals.requiredLanguages) {
+    const level = cvLangMap.get(reqLang);
+    if (!level) {
+      missingLanguages.push(reqLang);
+    } else if (level === 'basic' && signals.strongFluencyLanguages.includes(reqLang)) {
+      missingLanguages.push(reqLang);
+    }
+  }
+
+  const trainedPenalizedLangs: string[] = [];
+  let learnedPenaltyTotal = 0;
+  if (learnedWeightMap) {
+    const candidateLangs = new Set([
+      signals.postingLanguage,
+      ...signals.requiredLanguages,
+      ...signals.preferredLanguages,
+    ]);
+    for (const lang of candidateLangs) {
+      const delta = learnedWeightMap.get(`language::${lang}`) ?? 0;
+      if (delta <= -3.5) {
+        trainedPenalizedLangs.push(lang);
+        learnedPenaltyTotal += delta;
+      }
+    }
+  }
+
+  const missingLabels = missingLanguages.map(formatLanguageLabel);
+  const cvSummary = cvLanguages.length ? cvLanguages.join(', ') : 'English';
+  const postLabel = formatLanguageLabel(signals.postingLanguage);
+
+  if (missingLanguages.length > 0) {
+    const isForeignBody = signals.postingLanguage !== 'english';
+    const statement = isForeignBody
+      ? `OBJECTION: Posting is written in ${postLabel} and requires ${missingLabels.join(', ')} fluency, which does not align with your CV languages (${cvSummary}).`
+      : `OBJECTION: Posting requires ${missingLabels.join(', ')} fluency, which is not listed on your CV (${cvSummary}).`;
+    return {
+      aligned: false,
+      severity: 'mismatch',
+      postingLanguage: signals.postingLanguage,
+      requiredLanguages: signals.requiredLanguages,
+      preferredLanguages: signals.preferredLanguages,
+      missingLanguages,
+      cvLanguages,
+      learnedPenalizedLangs: trainedPenalizedLangs,
+      score: 10,
+      statement,
+    };
+  }
+
+  if (trainedPenalizedLangs.length > 0 && learnedPenaltyTotal <= -6) {
+    const penLabels = trainedPenalizedLangs.map(formatLanguageLabel).join(', ');
+    return {
+      aligned: false,
+      severity: 'mismatch',
+      postingLanguage: signals.postingLanguage,
+      requiredLanguages: signals.requiredLanguages,
+      preferredLanguages: signals.preferredLanguages,
+      missingLanguages,
+      cvLanguages,
+      learnedPenalizedLangs: trainedPenalizedLangs,
+      score: 20,
+      statement: `OBJECTION: Posting relies on ${penLabels}, which conflicts with your dismissed-language training in Jury memory.`,
+    };
+  }
+
+  const missingOptional = signals.preferredLanguages.filter((l) => !cvLangMap.has(l));
+  if (trainedPenalizedLangs.length > 0) {
+    const penLabels = trainedPenalizedLangs.map(formatLanguageLabel).join(', ');
+    return {
+      aligned: true,
+      severity: 'optional',
+      postingLanguage: signals.postingLanguage,
+      requiredLanguages: signals.requiredLanguages,
+      preferredLanguages: signals.preferredLanguages,
+      missingLanguages: [],
+      cvLanguages,
+      learnedPenalizedLangs: trainedPenalizedLangs,
+      score: 62,
+      statement: `Posting is in ${postLabel} (CV: ${cvSummary}), though it references ${penLabels} which received a prior language dismissal penalty.`,
+    };
+  }
+
+  if (missingOptional.length > 0) {
+    const optLabels = missingOptional.map(formatLanguageLabel).join(', ');
+    return {
+      aligned: true,
+      severity: 'optional',
+      postingLanguage: signals.postingLanguage,
+      requiredLanguages: signals.requiredLanguages,
+      preferredLanguages: signals.preferredLanguages,
+      missingLanguages: [],
+      cvLanguages,
+      learnedPenalizedLangs: [],
+      score: 88,
+      statement: `Posting is in ${postLabel} and aligns with your CV languages (${cvSummary}); ${optLabels} is mentioned only as an optional plus.`,
+    };
+  }
+
+  return {
+    aligned: true,
+    severity: 'match',
+    postingLanguage: signals.postingLanguage,
+    requiredLanguages: signals.requiredLanguages,
+    preferredLanguages: signals.preferredLanguages,
+    missingLanguages: [],
+    cvLanguages,
+    learnedPenalizedLangs: [],
+    score: 98,
+    statement: `Posting language (${postLabel}) and communication requirements align cleanly with your CV languages (${cvSummary}).`,
+  };
+}
+
+export interface RoleEligibilityResult {
+  constraintPass: boolean;
+  isSeniorTitle: boolean;
+  hasExperienceGate: boolean;
+  hasOffDomainTitle: boolean;
+  hasExcludedSkill: boolean;
+  hasExcludedTerm: boolean;
+  hasLanguageMismatch: boolean;
+  isSaudiOnly: boolean;
+  languageResult: LanguageAlignmentResult;
+  reason: string;
+}
+
+const GENERIC_ROLE_TOKENS = new Set([
+  'junior',
+  'jr',
+  'senior',
+  'sr',
+  'graduate',
+  'entry',
+  'level',
+  'associate',
+  'intern',
+  'trainee',
+  'engineer',
+  'engineering',
+  'developer',
+  'development',
+  'systems',
+  'system',
+  'specialist',
+  'analyst',
+  'technical',
+  'software',
+]);
+
+function stripNoisyBoilerplate(description: string): string {
+  return (description || '')
+    .replace(/^tags:\s*[^\n]+/gim, ' ')
+    .replace(/about\s+ramp[\s\S]{0,280}?spend\s+flows/gi, ' ')
+    .trim();
+}
+
+function hasEmbeddedEngineeringSignal(title: string, cleanedDesc: string): boolean {
+  const hay = `${title} ${cleanedDesc}`;
+  if (/\bembedded\s+(?:systems?|software|firmware|linux|engineer(?:ing)?|developer|hardware|robotics|iot|c\/?c\+\+|controller|devices?)\b/i.test(hay)) {
+    return true;
+  }
+  if (/\bembedded\b/i.test(title)) {
+    return true;
+  }
+  return /\b(firmware|microcontroller|stm32|esp32|arduino|rtos|fpga|verilog|vhdl|asic|rtl\s+design)\b/i.test(hay);
+}
+
+export function evaluateRoleEligibility(
+  profile: Partial<CandidateProfile>,
+  job: Partial<JobItem>,
+  learnedWeightMap?: Map<string, number>
+): RoleEligibilityResult {
+  const titleLower = (job.title || '').toLowerCase();
+  const descClean = stripNoisyBoilerplate(job.description || '').toLowerCase();
+  const hay = `${titleLower} ${descClean}`;
+
+  const excludedSkills = (profile.excluded_skills || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  const excludedTerms = (profile.excluded_job_terms || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+
+  const expLevel = (profile.experience_level || 'entry-level').toLowerCase();
+  const wantsEntryLevel =
+    expLevel.includes('entry') || expLevel.includes('junior') || expLevel.includes('grad');
+
+  const isSeniorTitle =
+    /\b(senior|sr\.?|staff|principal|lead|director|architect|softwarearchitekt|architekt|manager|head\s+of|head\b|vp|vice\s+president|chief|cto|ceo|cfo|executive|expert|fachexperte|founding|distinguished|fellow|master|partner|supervisor|leiter|teamleiter|projektleiter|abteilungsleiter|erfahrener|tier\s*iii|tier\s*3|level\s*[3-9]|iii|iv)\b/i.test(
+      titleLower
+    ) || /(?:architekt|teamleiter|abteilungsleiter)/i.test(titleLower);
+
+  const hasExperienceGate =
+    wantsEntryLevel &&
+    (/\b(?:[3-9]|1\d)\s*\+?\s*(?:to|-|–)?\s*(?:\d+\s*)?(?:years?|jahre?)\s+(?:of\s+)?(?:relevant\s+|industry\s+|professional\s+|work\s+|hands-on\s+|practical\s+|engineering\s+|software\s+|technical\s+|experience|berufserfahrung)\b/i.test(
+      descClean
+    ) ||
+      /\b(?:minimum|at\s+least|requires?|mindestens)\s+(?:of\s+)?(?:[3-9]|1\d)\s*\+?\s*(?:years?|jahre?)\b/i.test(
+        descClean
+      ) ||
+      /\bmehrjährige\s+berufserfahrung\b/i.test(descClean) ||
+      /\bphd\s+(?:required|only|mandatory)\b/i.test(descClean));
+
+  const targetLower = `${profile.target_roles || ''} ${profile.degree || ''}`.toLowerCase();
+  const candidateTargetsTech = /\b(engineer|developer|software|embedded|hardware|qa|testing|computer)\b/.test(
+    targetLower
+  );
+  const hasOffDomainTitle =
+    candidateTargetsTech &&
+    /\b(account\s+executive|sales\s+representative|partner\s+development|business\s+development|recruiter|talent\s+acquisition|marketing|content\s+creation|m&a|investor\s+relations|strategic\s+finance|payroll|legal|counsel|customer\s+experience|graphicdesign|grafikdesign)\b/i.test(
+      titleLower
+    );
+
+  const hasExcludedSkill = excludedSkills.some((s) => hasSkillMatch(hay, s));
+  const titleNormalized = titleLower.replace(/[-_\s]+/g, '');
+  const hasExcludedTerm = excludedTerms.some((term) => {
+    const t = term.trim();
+    if (!t) return false;
+    const tNorm = t.replace(/[-_\s]+/g, '');
+    return titleLower.includes(t) || (tNorm.length >= 4 && titleNormalized.includes(tNorm));
+  });
+  const isSaudiOnly = hay.includes('saudi national') || hay.includes('saudization');
+
+  const languageResult = evaluateLanguageAlignment(profile, job, learnedWeightMap);
+  const hasLanguageMismatch = !languageResult.aligned;
+
+  let constraintPass = true;
+  let reason =
+    "The listing aligns with the candidate's entry-level preference, language profile, domain track, and exclusion rules.";
+
+  if (hasLanguageMismatch) {
+    constraintPass = false;
+    reason = languageResult.statement;
+  } else if (wantsEntryLevel && isSeniorTitle) {
+    constraintPass = false;
+    reason = 'OBJECTION: Role title signals senior, lead, management, or expert tier beyond entry-level target.';
+  } else if (hasExperienceGate) {
+    constraintPass = false;
+    reason = 'OBJECTION: Posting description requires 3+ years of experience (or PhD), exceeding entry-level profile.';
+  } else if (hasOffDomainTitle) {
+    constraintPass = false;
+    reason = 'OBJECTION: Non-engineering commercial, marketing, or finance role outside CV engineering track.';
+  } else if (hasExcludedSkill) {
+    constraintPass = false;
+    reason = 'OBJECTION: Posting references an excluded skill configured in the candidate profile.';
+  } else if (hasExcludedTerm) {
+    constraintPass = false;
+    reason = 'OBJECTION: Role title matches an excluded job track in candidate preferences.';
+  } else if (isSaudiOnly) {
+    constraintPass = false;
+    reason = 'OBJECTION: Listing restricts eligibility to Saudi nationals.';
+  }
+
+  return {
+    constraintPass,
+    isSeniorTitle,
+    hasExperienceGate,
+    hasOffDomainTitle,
+    hasExcludedSkill,
+    hasExcludedTerm,
+    hasLanguageMismatch,
+    isSaudiOnly,
+    languageResult,
+    reason,
+  };
+}
+
 export function scoreCvMatch(
   profile: Partial<CandidateProfile>,
   job: Partial<JobItem>
 ): { score: number; matchedSkills: string[]; matchedRoles: string[] } {
-  const hay = `${job.title || ''} ${job.description || ''}`;
+  const title = job.title || '';
+  const cleanedDesc = stripNoisyBoilerplate(job.description || '');
+  const hay = `${title} ${cleanedDesc}`;
+  const titleLower = title.toLowerCase();
+
   const profileSkills = (profile.skills || '')
     .split(',')
     .map((s) => s.trim())
@@ -497,25 +1182,71 @@ export function scoreCvMatch(
     .map((r) => r.trim())
     .filter(Boolean);
 
-  const matchedSkills = combinedSkillPool.filter((skill) => hasSkillMatch(hay, skill));
-
-  const hayLower = hay.toLowerCase();
-  const matchedRoles = targetRoles.filter((role) => {
-    const tokens = role
-      .toLowerCase()
-      .split(/\s+/)
-      .filter((t) => t.length > 2 && !['junior', 'graduate', 'engineer'].includes(t));
-    return tokens.some((t) => hayLower.includes(t));
+  const matchedSkills = combinedSkillPool.filter((skill) => {
+    const lower = skill.toLowerCase();
+    if (lower === 'embedded systems' || lower === 'embedded') {
+      return hasEmbeddedEngineeringSignal(title, cleanedDesc);
+    }
+    return hasSkillMatch(hay, skill);
   });
 
-  let score = 28;
-  score += Math.min(44, matchedSkills.length * 14);
-  score += Math.min(20, matchedRoles.length * 10);
-  if (/\b(junior|graduate|entry|intern|trainee)\b/i.test(hay)) {
-    score += 8;
+  const isTechTitle = /\b(engineer|developer|embedded|firmware|hardware|rtl|asic|fpga|qa|test|automation|software|robotics|programmer|technician|sdet|systems)\b/i.test(
+    titleLower
+  );
+
+  const matchedRoles = targetRoles.filter((role) => {
+    const roleLower = role.toLowerCase();
+    if (titleLower.includes(roleLower)) return true;
+
+    const coreTokens = roleLower
+      .split(/[^a-z0-9+#]+/)
+      .filter((t) => t.length > 1 && !GENERIC_ROLE_TOKENS.has(t));
+
+    if (coreTokens.length === 0) {
+      return isTechTitle && roleLower.split(/\s+/).some((t) => t.length > 2 && titleLower.includes(t));
+    }
+
+    if (coreTokens.every((t) => (t === 'embedded' ? hasEmbeddedEngineeringSignal(title, cleanedDesc) : hasSkillMatch(hay, t)))) {
+      return true;
+    }
+
+    // Domain-adjacent engineering title match for embedded/computer-systems hardware & software tracks
+    if (coreTokens.includes('embedded') && isTechTitle) {
+      return /\b(embedded|firmware|rtl|asic|fpga|verilog|vhdl|microcontroller|hardware|robotics|iot|rtos|ugv)\b/i.test(
+        titleLower
+      );
+    }
+    return false;
+  });
+
+  const hasSkillInTitle = matchedSkills.some((skill) => {
+    const sLower = skill.toLowerCase();
+    if (sLower.includes('embedded')) return /\b(embedded|firmware|rtl|fpga|asic)\b/i.test(titleLower);
+    return hasSkillMatch(title, skill);
+  });
+
+  const isJuniorTechTitle =
+    isTechTitle &&
+    /\b(junior|jr\.?|graduate|early[\s-]career|entry[\s-]level|new\s+grad|intern|internship|trainee|associate|werkstudent)\b/i.test(
+      titleLower
+    );
+
+  let score = isTechTitle ? 14 : 8;
+  if (matchedSkills.length > 0) {
+    score += 24 + Math.min(34, (matchedSkills.length - 1) * 17);
   }
+  if (hasSkillInTitle) {
+    score += 12;
+  }
+  if (matchedRoles.length > 0) {
+    score += 18 + Math.min(8, (matchedRoles.length - 1) * 8);
+  }
+  if (isJuniorTechTitle) {
+    score += 14;
+  }
+
   return {
-    score: Math.min(100, Math.max(10, score)),
+    score: Math.min(100, Math.max(8, score)),
     matchedSkills,
     matchedRoles,
   };
@@ -555,6 +1286,15 @@ export function extractJobFeatures(job: Partial<JobItem>): Array<[string, string
     features.push(['career_level', 'senior']);
   } else if (/\b(junior|graduate|entry|intern|trainee|associate)\b/.test(title)) {
     features.push(['career_level', 'entry']);
+  }
+
+  const langSignals = detectJobLanguageSignals(job);
+  features.push(['language', langSignals.postingLanguage]);
+  for (const reqLang of langSignals.requiredLanguages) {
+    features.push(['language', reqLang]);
+  }
+  for (const prefLang of langSignals.preferredLanguages) {
+    features.push(['language', prefLang]);
   }
 
   // Deduplicate
@@ -629,6 +1369,7 @@ export function recordInteraction(
   const features = extractJobFeatures(job);
   const reasonPriorityType: Record<string, string> = {
     seniority: 'career_level',
+    language: 'language',
     skills: 'keyword',
     location: 'location',
     authorization: 'eligibility',
@@ -637,13 +1378,33 @@ export function recordInteraction(
     company: 'company',
   };
 
+  let explicitDetailLangs: string[] = [];
   if (detail && eventType === 'dismiss') {
+    explicitDetailLangs = extractExplicitLanguageAliases(detail);
+    for (const langKey of explicitDetailLangs) {
+      if (!features.some(([t, v]) => t === 'language' && v === langKey)) {
+        features.push(['language', langKey]);
+      }
+    }
     for (const token of detail.toLowerCase().split(/[^a-z0-9+]+/)) {
       if (token.length >= 3 && !STOP_WORDS.has(token)) {
         features.push(['keyword', token]);
       }
     }
   }
+
+  // When dismissing due to unsuitable job language, train specifically on non-English / named languages
+  // without penalizing 'language::english' just because boilerplate text was in English.
+  const hasNonEnglishLangFeature = features.some(([t, v]) => t === 'language' && v !== 'english');
+  const effectiveFeatures =
+    eventType === 'dismiss' && reason === 'language'
+      ? features.filter(([t, v]) => {
+          if (t === 'language' && v === 'english') {
+            return explicitDetailLangs.includes('english') || !hasNonEnglishLangFeature;
+          }
+          return true;
+        })
+      : features;
 
   const upsert = db.prepare(`
     INSERT INTO learned_weights (feature_type, feature_value, score_delta, positive_hits, negative_hits, updated_at)
@@ -655,10 +1416,10 @@ export function recordInteraction(
       updated_at = excluded.updated_at
   `);
 
-  for (const [ftype, fval] of features) {
+  for (const [ftype, fval] of effectiveFeatures) {
     let weight = baseWeight;
     if (reason && reasonPriorityType[reason] === ftype) {
-      weight = baseWeight * 2.0;
+      weight = reason === 'language' ? baseWeight * 2.5 : baseWeight * 2.0;
     }
     const pos = weight > 0 ? 1 : 0;
     const neg = weight < 0 ? 1 : 0;
@@ -881,18 +1642,18 @@ export function runJuryDeliberation(
     .prepare('SELECT * FROM jobs')
     .all() as unknown as JobItem[];
 
-  const excludedSkills = (profile.excluded_skills || '')
-    .split(',')
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
-  const excludedTerms = (profile.excluded_job_terms || '')
-    .split(',')
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
+  const weightsRows = db
+    .prepare('SELECT feature_type, feature_value, score_delta FROM learned_weights')
+    .all() as Array<{ feature_type: string; feature_value: string; score_delta: number }>;
+  const weightMap = new Map<string, number>();
+  for (const row of weightsRows) {
+    weightMap.set(`${row.feature_type}::${row.feature_value}`, row.score_delta);
+  }
+
   const preferredCity = (profile.residence || '').split(',')[0].trim().toLowerCase();
 
   const updateJobStmt = db.prepare(
-    `UPDATE jobs SET jury_score=?, score=?, is_daily_pick=?, advocate_agent=?, jury_verdict=?, location_priority_tier=? WHERE id=?`
+    `UPDATE jobs SET jury_score=?, score=?, is_daily_pick=?, advocate_agent=?, jury_verdict=?, location_priority_tier=?, cv_score=?, seniority_blocked=? WHERE id=?`
   );
   const insertArgStmt = db.prepare(
     `INSERT INTO agent_arguments (deliberation_id, job_id, agent_name, agent_role, argument_type, statement, score, created_at)
@@ -906,6 +1667,8 @@ export function runJuryDeliberation(
   interface ScoredCandidate {
     job: JobItem;
     finalScore: number;
+    cvScore: number;
+    seniorityBlocked: number;
     locationTier: 1 | 2 | 3 | 4;
     advocate: string;
     verdict: string;
@@ -923,82 +1686,88 @@ export function runJuryDeliberation(
   const evaluated: ScoredCandidate[] = [];
 
   for (const job of jobs) {
-    const titleLower = (job.title || '').toLowerCase();
-    const descLower = (job.description || '').toLowerCase();
-    const hay = `${titleLower} ${descLower}`;
     const isDismissed = job.status === 'dismissed';
 
     const cvMatch = scoreCvMatch(profile, job);
     const { boost, reasons } = computeLearnedBoost(db, job);
-
-    const isSenior = /\b(senior|staff|principal|lead|director|architect|manager|head of)\b/.test(titleLower);
-    const hasExcludedSkill = excludedSkills.some((s) => hasSkillMatch(hay, s));
-    const hasExcludedTerm = excludedTerms.some((t) => titleLower.includes(t));
-    const isSaudiOnly = hay.includes('saudi national') || hay.includes('saudization');
-
-    let constraintPass = true;
-    let constraintNote =
-      "The listing does not conflict with the candidate's entry-level preference, stated skill exclusions, or avoided role types.";
-    if (profile.experience_level === 'entry-level' && isSenior) {
-      constraintPass = false;
-      constraintNote = 'OBJECTION: Role title signals senior/leadership tier beyond entry-level target.';
-    } else if (hasExcludedSkill) {
-      constraintPass = false;
-      constraintNote = 'OBJECTION: Posting references an excluded skill configured in the candidate profile.';
-    } else if (hasExcludedTerm) {
-      constraintPass = false;
-      constraintNote = 'OBJECTION: Role title matches an excluded job track in candidate preferences.';
-    } else if (isSaudiOnly) {
-      constraintPass = false;
-      constraintNote = 'OBJECTION: Listing restricts eligibility to Saudi nationals.';
-    }
+    const elig = evaluateRoleEligibility(profile, job, weightMap);
+    const constraintPass = elig.constraintPass;
+    const constraintNote = elig.reason;
+    const hasCvEvidence = cvMatch.matchedSkills.length >= 1 || cvMatch.matchedRoles.length >= 1;
 
     const locPriority = evaluateLocationPriority(profile, job);
     const isLive = job.liveness_status === 'live';
 
+    const locationBoost =
+      locPriority.tier <= 2
+        ? Math.round(locPriority.scoreBonus * 0.65)
+        : locPriority.isRemote
+          ? 4
+          : 0;
+
     let rawScore = Math.round(
-      cvMatch.score * 0.6 +
-        (isLive ? 14 : 0) +
-        (locPriority.hasVisa ? 6 : 0) +
+      cvMatch.score * 0.72 +
+        (isLive ? 12 : 0) +
+        (locPriority.hasVisa ? 5 : 0) +
         (locPriority.hasAccommodation ? 4 : 0) +
-        locPriority.scoreBonus +
-        boost
+        locationBoost +
+        Math.round(boost * 0.55)
     );
-    if (!constraintPass) rawScore = Math.max(15, rawScore - 28);
-    if (isDismissed) rawScore = Math.max(10, rawScore - 18);
+    if (!hasCvEvidence) {
+      rawScore = Math.min(34, rawScore);
+    }
+    if (!constraintPass) {
+      rawScore = Math.min(26, Math.max(10, rawScore - 40));
+    }
+    if (isDismissed) {
+      rawScore = Math.min(24, Math.max(10, rawScore - 20));
+    }
     const finalScore = Math.max(10, Math.min(98, rawScore));
 
-    const eligibleForDaily = !isDismissed && isLive && constraintPass && job.authenticity_status !== 'suspicious';
+    const eligibleForDaily =
+      !isDismissed &&
+      isLive &&
+      constraintPass &&
+      job.authenticity_status !== 'suspicious' &&
+      cvMatch.score >= 38 &&
+      hasCvEvidence;
+
     const advocate =
       locPriority.tier <= 2
         ? 'Visa & Relocation Advocate'
-        : cvMatch.matchedSkills.length >= 2
+        : cvMatch.matchedSkills.length >= 1
           ? 'Software & Systems Agent'
           : 'Quality & Operations Agent';
 
     const verdict = isDismissed
       ? 'REJECTED BY CANDIDATE & JURY BENCH'
-      : !isLive
-        ? 'REJECTED — LINK UNAVAILABLE / UNVERIFIED'
-        : !constraintPass
-          ? 'REJECTED — CONSTRAINED BY PROFILE PREFERENCES'
-          : finalScore >= 55
-            ? 'APPROVED BY MAJORITY VOTE'
-            : 'TOP CANDIDATE — REVIEW MATCH DETAILS';
+      : !constraintPass
+        ? elig.hasLanguageMismatch
+          ? 'REJECTED — LANGUAGE REQUIREMENT MISMATCH'
+          : 'REJECTED — SENIORITY / PROFILE CONSTRAINT'
+        : !hasCvEvidence || cvMatch.score < 38
+          ? 'LOW CV MATCH — OFF-PROFILE DOMAIN'
+          : !isLive
+            ? 'REJECTED — LINK UNAVAILABLE / UNVERIFIED'
+            : finalScore >= 55
+              ? 'APPROVED BY MAJORITY VOTE'
+              : 'TOP CANDIDATE — REVIEW MATCH DETAILS';
 
     const recommendation = isDismissed
       ? 'Previously rejected/dismissed in your pipeline; kept in Jury memory as a negative training example.'
       : !constraintPass
-        ? 'Eliminated during cross-examination because it violates your seniority, skill, or role-track exclusions.'
-        : !isLive
-          ? 'Posting reachability could not be confirmed today. Excluded from the top 5.'
-          : locPriority.tier === 1
-            ? `Priority Tier 1: Located in your current city (${profile.residence || preferredCity}). Ranked first.`
-            : locPriority.tier === 2
-              ? 'Priority Tier 2: Relocating city/country with both visa and accommodation/relocation support verified.'
-              : locPriority.hasVisa
-                ? 'Visa signals present, though accommodation is not explicitly confirmed.'
-                : 'Other location without confirmed visa & accommodation; ranked behind local and full-relocation roles.';
+        ? elig.reason.replace(/^OBJECTION:\s*/i, '')
+        : !hasCvEvidence
+          ? 'No direct overlap with your CV skills or target role tracks; filtered out of Daily Picks.'
+          : !isLive
+            ? 'Posting reachability could not be confirmed today. Excluded from the top 5.'
+            : locPriority.tier === 1
+              ? `Priority Tier 1: Located in your current city (${profile.residence || preferredCity}). Ranked first.`
+              : locPriority.tier === 2
+                ? 'Priority Tier 2: Relocating city/country with both visa and accommodation/relocation support verified.'
+                : locPriority.hasVisa
+                  ? 'Visa signals present, though accommodation is not explicitly confirmed.'
+                  : 'Strong entry-level CV & skill alignment; ranked behind local and full-relocation roles.';
 
     const args = [
       {
@@ -1024,15 +1793,22 @@ export function runJuryDeliberation(
         agent_name: 'CV & Target Role Analyst',
         agent_role: 'Candidate Experience and Role Alignment',
         argument_type: 'cv_match',
-        statement: `Candidate profile match is ${cvMatch.score}/100.${cvMatch.matchedSkills.length ? ` Matched CV skills: ${cvMatch.matchedSkills.join(', ')}.` : ' Limited direct skill keyword overlap; review posting scope.'}`,
+        statement: `Candidate profile match is ${cvMatch.score}/100.${cvMatch.matchedSkills.length ? ` Matched CV skills: ${cvMatch.matchedSkills.join(', ')}.` : ''}${cvMatch.matchedRoles.length ? ` Target track: ${cvMatch.matchedRoles.join(', ')}.` : ''}${!cvMatch.matchedSkills.length && !cvMatch.matchedRoles.length ? ' No direct CV skill or target role match detected.' : ''}`,
         score: cvMatch.score,
+      },
+      {
+        agent_name: 'Language Alignment Counsel',
+        agent_role: 'Job Language & CV Fluency Alignment',
+        argument_type: 'language_alignment',
+        statement: elig.languageResult.statement,
+        score: elig.languageResult.score,
       },
       {
         agent_name: 'Candidate Experience Fit Examiner',
         agent_role: 'Seniority, Skills & Role Preference Review',
         argument_type: 'candidate_constraints',
         statement: isDismissed ? `REJECTED: Previously dismissed by candidate; ${constraintNote}` : constraintNote,
-        score: !isDismissed && constraintPass ? 100 : 20,
+        score: !isDismissed && constraintPass ? 100 : 15,
       },
       {
         agent_name: 'Visa & Relocation Advocate',
@@ -1075,6 +1851,8 @@ export function runJuryDeliberation(
     evaluated.push({
       job,
       finalScore,
+      cvScore: cvMatch.score,
+      seniorityBlocked: constraintPass ? 0 : 1,
       locationTier: locPriority.tier,
       advocate,
       verdict,
@@ -1086,7 +1864,9 @@ export function runJuryDeliberation(
 
   evaluated.sort((a, b) => {
     if (a.eligibleForDaily !== b.eligibleForDaily) return a.eligibleForDaily ? -1 : 1;
-    if (a.locationTier !== b.locationTier) return a.locationTier - b.locationTier;
+    const tierA = a.locationTier <= 2 ? a.locationTier : 3;
+    const tierB = b.locationTier <= 2 ? b.locationTier : 3;
+    if (tierA !== tierB) return tierA - tierB;
     return b.finalScore - a.finalScore;
   });
 
@@ -1097,13 +1877,14 @@ export function runJuryDeliberation(
       .map((e) => e.job.id)
   );
 
-  // Persist rich transcripts for top 35 approved/active + up to 20 rejected/dismissed/constrained roles
-  const rejectedToPersist = new Set(
-    evaluated
-      .filter((e) => !e.eligibleForDaily)
-      .slice(0, 20)
-      .map((e) => e.job.id)
-  );
+  // Persist rich transcripts for top 35 approved/active + dismissed + diverse rejected (language mismatch, seniority, other) roles
+  const nonEligible = evaluated.filter((e) => !e.eligibleForDaily);
+  const rejectedToPersist = new Set<string>([
+    ...nonEligible.filter((e) => e.job.status === 'dismissed').slice(0, 10).map((e) => e.job.id),
+    ...nonEligible.filter((e) => e.verdict.includes('LANGUAGE')).slice(0, 10).map((e) => e.job.id),
+    ...nonEligible.filter((e) => e.verdict.includes('SENIORITY')).slice(0, 10).map((e) => e.job.id),
+    ...nonEligible.slice(0, 15).map((e) => e.job.id),
+  ]);
 
   const summary = `Supreme Jury convened across ${evaluated.length} active & rejected vacancies. Crowned ${crownedIds.size} reachable openings matching ${profile.name}'s profile.`;
 
@@ -1127,6 +1908,8 @@ export function runJuryDeliberation(
         item.advocate,
         finalVerdict,
         item.locationTier,
+        item.cvScore,
+        item.seniorityBlocked,
         item.job.id
       );
 
@@ -1177,15 +1960,6 @@ export function recalibrateScoresFromWeights(
   profile: CandidateProfile
 ): { updatedCount: number; dailyPicksCount: number } {
   const jobs = db.prepare('SELECT * FROM jobs').all() as unknown as JobItem[];
-  const excludedSkills = (profile.excluded_skills || '')
-    .split(',')
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
-  const excludedTerms = (profile.excluded_job_terms || '')
-    .split(',')
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
-  const preferredCity = (profile.residence || '').split(',')[0].trim().toLowerCase();
 
   const weightsRows = db
     .prepare('SELECT feature_type, feature_value, score_delta FROM learned_weights')
@@ -1195,13 +1969,19 @@ export function recalibrateScoresFromWeights(
     weightMap.set(`${row.feature_type}::${row.feature_value}`, row.score_delta);
   }
 
-  const scored: Array<{ id: string; finalScore: number; locationTier: number; eligible: boolean }> = [];
+  const scored: Array<{
+    id: string;
+    finalScore: number;
+    cvScore: number;
+    seniorityBlocked: number;
+    locationTier: number;
+    eligible: boolean;
+  }> = [];
+
   for (const job of jobs) {
-    const titleLower = (job.title || '').toLowerCase();
-    const descLower = (job.description || '').toLowerCase();
-    const hay = `${titleLower} ${descLower}`;
     const isDismissed = job.status === 'dismissed';
     const cvMatch = scoreCvMatch(profile, job);
+    const hasCvEvidence = cvMatch.matchedSkills.length >= 1 || cvMatch.matchedRoles.length >= 1;
 
     let boostRaw = 0;
     for (const [ftype, fval] of extractJobFeatures(job)) {
@@ -1210,49 +1990,80 @@ export function recalibrateScoresFromWeights(
     }
     const boost = Math.max(-25, Math.min(25, Math.round(boostRaw)));
 
-    const isSenior = /\b(senior|staff|principal|lead|director|architect|manager|head of)\b/.test(titleLower);
-    const hasExcludedSkill = excludedSkills.some((s) => hasSkillMatch(hay, s));
-    const hasExcludedTerm = excludedTerms.some((t) => titleLower.includes(t));
-    const isSaudiOnly = hay.includes('saudi national') || hay.includes('saudization');
-
-    let constraintPass = true;
-    if (profile.experience_level === 'entry-level' && isSenior) constraintPass = false;
-    else if (hasExcludedSkill || hasExcludedTerm || isSaudiOnly) constraintPass = false;
-
+    const elig = evaluateRoleEligibility(profile, job, weightMap);
+    const constraintPass = elig.constraintPass;
     const locPriority = evaluateLocationPriority(profile, job);
     const isLive = job.liveness_status === 'live';
 
+    const locationBoost =
+      locPriority.tier <= 2
+        ? Math.round(locPriority.scoreBonus * 0.65)
+        : locPriority.isRemote
+          ? 4
+          : 0;
+
     let rawScore = Math.round(
-      cvMatch.score * 0.6 +
-        (isLive ? 14 : 0) +
-        (locPriority.hasVisa ? 6 : 0) +
+      cvMatch.score * 0.72 +
+        (isLive ? 12 : 0) +
+        (locPriority.hasVisa ? 5 : 0) +
         (locPriority.hasAccommodation ? 4 : 0) +
-        locPriority.scoreBonus +
-        boost
+        locationBoost +
+        Math.round(boost * 0.55)
     );
-    if (!constraintPass) rawScore = Math.max(15, rawScore - 28);
-    if (isDismissed) rawScore = Math.max(10, rawScore - 18);
+    if (!hasCvEvidence) {
+      rawScore = Math.min(34, rawScore);
+    }
+    if (!constraintPass) {
+      rawScore = Math.min(26, Math.max(10, rawScore - 40));
+    }
+    if (isDismissed) {
+      rawScore = Math.min(24, Math.max(10, rawScore - 20));
+    }
     const finalScore = Math.max(10, Math.min(98, rawScore));
 
-    const eligible = !isDismissed && isLive && constraintPass && job.authenticity_status !== 'suspicious';
-    scored.push({ id: job.id, finalScore, locationTier: locPriority.tier, eligible });
+    const eligible =
+      !isDismissed &&
+      isLive &&
+      constraintPass &&
+      job.authenticity_status !== 'suspicious' &&
+      cvMatch.score >= 38 &&
+      hasCvEvidence;
+
+    scored.push({
+      id: job.id,
+      finalScore,
+      cvScore: cvMatch.score,
+      seniorityBlocked: constraintPass ? 0 : 1,
+      locationTier: locPriority.tier,
+      eligible,
+    });
   }
 
   scored.sort((a, b) => {
     if (a.eligible !== b.eligible) return a.eligible ? -1 : 1;
-    if (a.locationTier !== b.locationTier) return a.locationTier - b.locationTier;
+    const tierA = a.locationTier <= 2 ? a.locationTier : 3;
+    const tierB = b.locationTier <= 2 ? b.locationTier : 3;
+    if (tierA !== tierB) return tierA - tierB;
     return b.finalScore - a.finalScore;
   });
 
   const pickIds = new Set(scored.filter((s) => s.eligible).slice(0, 5).map((s) => s.id));
   const updateStmt = db.prepare(
-    'UPDATE jobs SET jury_score=?, score=?, is_daily_pick=?, location_priority_tier=? WHERE id=?'
+    'UPDATE jobs SET jury_score=?, score=?, is_daily_pick=?, location_priority_tier=?, cv_score=?, seniority_blocked=? WHERE id=?'
   );
 
   db.exec('BEGIN');
   try {
     for (const s of scored) {
-      updateStmt.run(s.finalScore, s.finalScore, pickIds.has(s.id) ? 1 : 0, s.locationTier, s.id);
+      updateStmt.run(
+        s.finalScore,
+        s.finalScore,
+        pickIds.has(s.id) ? 1 : 0,
+        s.locationTier,
+        s.cvScore,
+        s.seniorityBlocked,
+        s.id
+      );
     }
     db.exec('COMMIT');
   } catch (err) {

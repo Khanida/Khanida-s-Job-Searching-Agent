@@ -35,6 +35,7 @@ function AppWorkspace({
   const [statusFilter, setStatusFilter] = useState('all');
   const [sourceFilter, setSourceFilter] = useState('all');
   const [livenessFilter, setLivenessFilter] = useState('all');
+  const [fitFilter, setFitFilter] = useState<'matched' | 'all'>('matched');
   const [searchInput, setSearchInput] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
   const [minSalary, setMinSalary] = useState(SALARY_SLIDER_MIN);
@@ -113,6 +114,7 @@ function AppWorkspace({
           status: statusFilter,
           source: sourceFilter,
           liveness: livenessFilter,
+          fitFilter,
           q: debouncedQuery,
           minSalary: String(debouncedSalaryRange.min),
           maxSalary: String(debouncedSalaryRange.max),
@@ -136,6 +138,7 @@ function AppWorkspace({
       statusFilter,
       sourceFilter,
       livenessFilter,
+      fitFilter,
       debouncedQuery,
       debouncedSalaryRange,
       includeUndisclosed,
@@ -414,6 +417,7 @@ function AppWorkspace({
             statusFilter={statusFilter}
             sourceFilter={sourceFilter}
             livenessFilter={livenessFilter}
+            fitFilter={fitFilter}
             searchInput={searchInput}
             minSalary={minSalary}
             maxSalary={maxSalary}
@@ -433,6 +437,10 @@ function AppWorkspace({
             }}
             onLivenessFilterChange={(next) => {
               setLivenessFilter(next);
+              setPage(1);
+            }}
+            onFitFilterChange={(next) => {
+              setFitFilter(next);
               setPage(1);
             }}
             onSearchInputChange={setSearchInput}

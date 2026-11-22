@@ -20,6 +20,7 @@ interface OverviewViewProps {
   statusFilter: string;
   sourceFilter: string;
   livenessFilter: string;
+  fitFilter: 'matched' | 'all';
   searchInput: string;
   minSalary: number;
   maxSalary: number;
@@ -29,6 +30,7 @@ interface OverviewViewProps {
   onStatusFilterChange: (status: string) => void;
   onSourceFilterChange: (source: string) => void;
   onLivenessFilterChange: (liveness: string) => void;
+  onFitFilterChange: (fit: 'matched' | 'all') => void;
   onSearchInputChange: (value: string) => void;
   onSalaryRangeChange: (min: number, max: number) => void;
   onIncludeUndisclosedChange: (include: boolean) => void;
@@ -49,6 +51,7 @@ export function OverviewView({
   statusFilter,
   sourceFilter,
   livenessFilter,
+  fitFilter,
   searchInput,
   minSalary,
   maxSalary,
@@ -58,6 +61,7 @@ export function OverviewView({
   onStatusFilterChange,
   onSourceFilterChange,
   onLivenessFilterChange,
+  onFitFilterChange,
   onSearchInputChange,
   onSalaryRangeChange,
   onIncludeUndisclosedChange,
@@ -78,7 +82,7 @@ export function OverviewView({
   const pagination = data?.pagination;
 
   const statusTabs: Array<{ key: string; label: string; count?: number }> = [
-    { key: 'all', label: 'Active', count: stats?.activeCount },
+    { key: 'all', label: 'Active', count: fitFilter === 'matched' ? (stats?.matchedCount ?? stats?.activeCount) : stats?.activeCount },
     { key: 'shortlisted', label: 'Shortlisted', count: stats?.shortlistedCount },
     { key: 'applied', label: 'Applied', count: stats?.appliedCount },
     { key: 'new', label: 'New', count: stats?.newCount },
@@ -146,12 +150,12 @@ export function OverviewView({
       <section aria-label="Pipeline metrics">
         <div className="grid grid-cols-2 lg:grid-cols-4 bg-white border border-slate-200 rounded-xl divide-y sm:divide-y-0 sm:divide-x divide-slate-200">
           <div className="p-5">
-            <div className="text-xs font-medium text-slate-500">Active Pool</div>
+            <div className="text-xs font-medium text-slate-500">CV &amp; Level Matched</div>
             <div className="font-mono text-2xl font-semibold text-slate-900 tabular-nums mt-1">
-              {stats ? stats.activeCount : '—'}
+              {stats ? (stats.matchedCount ?? stats.activeCount) : '—'}
             </div>
             <div className="text-xs text-slate-500 mt-1 tabular-nums">
-              {stats ? `${stats.liveCount} verified live` : 'Loading…'}
+              {stats ? `${stats.seniorFilteredCount ?? 0} senior/language/off-track excluded` : 'Loading…'}
             </div>
           </div>
           <div className="p-5">
@@ -421,6 +425,31 @@ export function OverviewView({
                 ))}
               </select>
 
+              <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg" title="Filter senior and unrelated roles">
+                <button
+                  type="button"
+                  onClick={() => onFitFilterChange('matched')}
+                  className={`px-2.5 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap ${
+                    fitFilter === 'matched'
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  CV &amp; Level Fit
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onFitFilterChange('all')}
+                  className={`px-2.5 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap ${
+                    fitFilter === 'all'
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  All Roles
+                </button>
+              </div>
+
               <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
                 <button
                   type="button"
@@ -506,6 +535,28 @@ export function OverviewView({
                         <>
                           <span aria-hidden="true">·</span>
                           <PipelineStatusLabel status={job.status} />
+                        </>
+                      )}
+                      {typeof job.cv_score === 'number' && job.cv_score > 0 && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span
+                            className={`font-mono font-medium tabular-nums ${
+                              job.cv_score >= 55
+                                ? 'text-emerald-700'
+                                : job.cv_score >= 35
+                                  ? 'text-slate-700'
+                                  : 'text-slate-400'
+                            }`}
+                          >
+                            CV {job.cv_score}%
+                          </span>
+                        </>
+                      )}
+                      {job.seniority_blocked === 1 && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="font-medium text-amber-700">Senior / Off-Track</span>
                         </>
                       )}
                       {typeof job.learned_boost === 'number' && job.learned_boost !== 0 && (

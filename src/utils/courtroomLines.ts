@@ -54,10 +54,16 @@ export function buildCourtroomDialogue(
     args.find((a) => a.agent_name.includes('Quality')) ||
     args.find((a) => a.argument_type === 'candidate_constraints') ||
     args.find((a) => a.argument_type === 'availability_check');
+  const langArg =
+    args.find((a) => a.argument_type === 'language_alignment') ||
+    args.find((a) => a.agent_name.includes('Language'));
 
   const swScore = swArg?.score ?? job.jury_score ?? job.score ?? 50;
   const visaScore = visaArg?.score ?? 45;
   const qaScore = qaArg?.score ?? 75;
+  const hasLanguageObjection = Boolean(
+    langArg && (langArg.score < 50 || /^OBJECTION:/i.test(langArg.statement))
+  );
 
   const company = job.company || 'the employer';
   const title = job.title || 'this role';
@@ -188,7 +194,7 @@ export function buildCourtroomDialogue(
     );
   }
 
-  // 4. Quality & Operations Examiner (Witty/Sarcastic One-Sentence)
+  // 4. Language Alignment / Quality & Operations Examiner (Witty/Sarcastic One-Sentence)
   let examinerStatement: string;
   if (isDismissed) {
     examinerStatement = pickVariant(
@@ -198,6 +204,9 @@ export function buildCourtroomDialogue(
       ],
       seed + 19
     );
+  } else if (hasLanguageObjection && langArg) {
+    const cleanLangReason = langArg.statement.replace(/^OBJECTION:\s*/i, '').trim();
+    examinerStatement = `Language Counsel objects: ${cleanLangReason}`;
   } else if (hasConstraintWarning) {
     examinerStatement = pickVariant(
       [
@@ -209,17 +218,17 @@ export function buildCourtroomDialogue(
   } else if (isLive && isOfficial) {
     examinerStatement = pickVariant(
       [
-        `Receipts verified: ${company}'s official link on ${source} is genuinely live, already beating half the ghost jobs online.`,
-        `Domain and liveness checks passed cleanly—an authentic open req instead of another phantom career page.`,
-        `Zero broken links or sketchy redirects on ${source}, meaning this posting actually respects candidates' time.`,
+        `Receipts verified: ${company}'s official link on ${source} is genuinely live and CV-language aligned, beating ghost jobs online.`,
+        `Domain, language fluency, and liveness checks passed cleanly—an authentic open req ready for review.`,
+        `Zero broken links or hidden language barriers on ${source}; this posting actually respects candidates' time.`,
       ],
       seed + 23
     );
   } else if (isLive) {
     examinerStatement = pickVariant(
       [
-        `The ${source} URL responds live right now, though prudence says verify directly on ${company}'s careers portal.`,
-        `Link availability holds up today, even if third-party boards love keeping stale seats warm longer than advertised.`,
+        `The ${source} URL responds live and language aligns with your CV, though verify intake directly on ${company}'s portal.`,
+        `Link availability and working language hold up today; confirm directly before investing custom edits.`,
         `Operational pulse is live on ${source}; double-check official intake before pouring hours into custom edits.`,
       ],
       seed + 29
@@ -244,6 +253,14 @@ export function buildCourtroomDialogue(
         `Gavel down—${company} stays rejected; preference weights updated to avoid similar roles.`,
       ],
       seed + 35
+    );
+  } else if (hasLanguageObjection) {
+    juryComment = pickVariant(
+      [
+        `Rejected on language grounds—"${title}" at ${company} does not match your CV languages and goes to the Rejected Rail.`,
+        `Motion denied by Language Alignment Counsel: "${title}" requires fluency outside your CV profile.`,
+      ],
+      seed + 36
     );
   } else if (!isLive) {
     juryComment = pickVariant(
@@ -303,10 +320,16 @@ export function buildCourtroomDialogue(
       score: visaScore,
     },
     examiner: {
-      name: qaArg?.agent_name || 'Quality & Operations Counsel',
-      role: qaArg?.agent_role || 'Posting Availability & Fit Examiner',
+      name:
+        hasLanguageObjection && langArg
+          ? langArg.agent_name
+          : qaArg?.agent_name || 'Quality & Operations Counsel',
+      role:
+        hasLanguageObjection && langArg
+          ? langArg.agent_role
+          : qaArg?.agent_role || 'Posting Availability & Fit Examiner',
       statement: examinerStatement,
-      score: qaScore,
+      score: hasLanguageObjection && langArg ? langArg.score : qaScore,
     },
     juryComment,
   };

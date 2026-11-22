@@ -229,7 +229,7 @@ export function SettingsView({
             </div>
             <div>
               <dt className="text-xs font-medium text-slate-500">Level 2 Sub-Agents</dt>
-              <dd className="text-slate-800 mt-0.5">Software &amp; Systems Screener, Quality &amp; Operations, Visa &amp; Relocation Advocate, CV Analyst</dd>
+              <dd className="text-slate-800 mt-0.5">Software &amp; Systems Screener, Language Alignment Counsel, Quality &amp; Operations, Visa &amp; Relocation Advocate, CV Analyst</dd>
             </div>
             <div>
               <dt className="text-xs font-medium text-slate-500">Level 1 Arbiter</dt>

@@ -106,6 +106,12 @@ function ensureSchema() {
   if (!existingCols.has('location_priority_tier')) {
     db.exec('ALTER TABLE jobs ADD COLUMN location_priority_tier INTEGER DEFAULT 4;');
   }
+  if (!existingCols.has('cv_score')) {
+    db.exec('ALTER TABLE jobs ADD COLUMN cv_score INTEGER DEFAULT 0;');
+  }
+  if (!existingCols.has('seniority_blocked')) {
+    db.exec('ALTER TABLE jobs ADD COLUMN seniority_blocked INTEGER DEFAULT 0;');
+  }
 }
 
 ensureSchema();
@@ -226,6 +232,31 @@ function getStats() {
     ).c
   );
   const liveCount = Number((db.prepare("SELECT COUNT(*) as c FROM jobs WHERE liveness_status='live' AND status != 'dismissed'").get() as { c: number }).c);
+  const matchedCount = Number(
+    (
+      db
+        .prepare(
+          `SELECT COUNT(*) as c FROM jobs
+           WHERE status != 'dismissed'
+             AND (status = 'applied' OR ${NOT_EXPIRED_LIVENESS_SQL})
+             AND COALESCE(seniority_blocked, 0) = 0
+             AND COALESCE(cv_score, 0) >= 35`
+        )
+        .get() as { c: number }
+    ).c
+  );
+  const seniorFilteredCount = Number(
+    (
+      db
+        .prepare(
+          `SELECT COUNT(*) as c FROM jobs
+           WHERE status != 'dismissed'
+             AND (status = 'applied' OR ${NOT_EXPIRED_LIVENESS_SQL})
+             AND COALESCE(seniority_blocked, 0) = 1`
+        )
+        .get() as { c: number }
+    ).c
+  );
   const sources = db
     .prepare(
       `SELECT source, COUNT(*) as count FROM jobs WHERE status != 'dismissed' AND (status = 'applied' OR ${NOT_EXPIRED_LIVENESS_SQL}) GROUP BY source ORDER BY count DESC`
@@ -242,6 +273,8 @@ function getStats() {
     expiredCount,
     dismissedCount,
     liveCount,
+    matchedCount,
+    seniorFilteredCount,
     sources,
   };
 }
@@ -392,6 +425,8 @@ function getDailyDigest() {
          WHERE v.deliberation_id IN (${placeholders})
            AND j.status != 'dismissed'
            AND ${NOT_EXPIRED_LIVENESS_SQL}
+           AND COALESCE(j.seniority_blocked, 0) = 0
+           AND COALESCE(j.cv_score, 0) >= 35
          ORDER BY CASE WHEN v.deliberation_id = ? THEN 0 ELSE 1 END ASC,
                   j.is_daily_pick DESC,
                   COALESCE(j.location_priority_tier, 4) ASC,
@@ -430,7 +465,10 @@ function getDailyDigest() {
     const fallbackJobs = db
       .prepare(
         `SELECT * FROM jobs
-         WHERE status != 'dismissed' AND ${NOT_EXPIRED_LIVENESS_SQL}
+         WHERE status != 'dismissed'
+           AND ${NOT_EXPIRED_LIVENESS_SQL}
+           AND COALESCE(seniority_blocked, 0) = 0
+           AND COALESCE(cv_score, 0) >= 35
          ORDER BY is_daily_pick DESC, COALESCE(location_priority_tier, 4) ASC, jury_score DESC, score DESC
          LIMIT 10`
       )
@@ -483,8 +521,9 @@ function getDailyDigest() {
     .sort((a, b) => {
       const pickDiff = (b.job.is_daily_pick ? 1 : 0) - (a.job.is_daily_pick ? 1 : 0);
       if (pickDiff !== 0) return pickDiff;
-      const tierDiff = (a.job.location_priority_tier ?? 4) - (b.job.location_priority_tier ?? 4);
-      if (tierDiff !== 0) return tierDiff;
+      const tierA = (a.job.location_priority_tier ?? 4) <= 2 ? (a.job.location_priority_tier ?? 4) : 3;
+      const tierB = (b.job.location_priority_tier ?? 4) <= 2 ? (b.job.location_priority_tier ?? 4) : 3;
+      if (tierA !== tierB) return tierA - tierB;
       return b.consensusScore - a.consensusScore;
     });
 
@@ -556,6 +595,7 @@ app.get('/api/dashboard', (req: Request, res: Response) => {
   const q = String(req.query.q || '').trim();
   const source = String(req.query.source || 'all');
   const liveness = String(req.query.liveness || 'all');
+  const fitFilter = String(req.query.fitFilter || 'matched');
   const minSalary = Math.max(0, Number(req.query.minSalary || 0) || 0);
   const rawMax = Number(req.query.maxSalary);
   const maxSalary = Number.isFinite(rawMax) && rawMax > 0 ? Math.min(SALARY_SLIDER_MAX, rawMax) : SALARY_SLIDER_MAX;
@@ -577,6 +617,10 @@ app.get('/api/dashboard', (req: Request, res: Response) => {
   } else if (status === 'applied' || status === 'dismissed') {
     whereParts.push('status = ?');
     params.push(status);
+  }
+
+  if (fitFilter === 'matched' && (status === 'all' || status === 'new')) {
+    whereParts.push("COALESCE(seniority_blocked, 0) = 0 AND COALESCE(cv_score, 0) >= 35");
   }
 
   if (source !== 'all') {
@@ -627,7 +671,12 @@ app.get('/api/dashboard', (req: Request, res: Response) => {
   const jobsRows = db
     .prepare(
       `SELECT * FROM jobs ${whereClause}
-       ORDER BY is_daily_pick DESC, COALESCE(location_priority_tier, 4) ASC, jury_score DESC, score DESC, created_at DESC
+       ORDER BY is_daily_pick DESC,
+                CASE WHEN COALESCE(location_priority_tier, 4) <= 2 THEN COALESCE(location_priority_tier, 4) ELSE 3 END ASC,
+                jury_score DESC,
+                cv_score DESC,
+                score DESC,
+                created_at DESC
        LIMIT ? OFFSET ?`
     )
     .all(...params, limit, offset) as unknown as JobItem[];
@@ -635,7 +684,11 @@ app.get('/api/dashboard', (req: Request, res: Response) => {
   const dailyPickRows = db
     .prepare(
       `SELECT * FROM jobs WHERE is_daily_pick = 1 AND status != 'dismissed' AND ${NOT_EXPIRED_LIVENESS_SQL}
-       ORDER BY COALESCE(location_priority_tier, 4) ASC, jury_score DESC, score DESC LIMIT 5`
+       ORDER BY CASE WHEN COALESCE(location_priority_tier, 4) <= 2 THEN COALESCE(location_priority_tier, 4) ELSE 3 END ASC,
+                jury_score DESC,
+                cv_score DESC,
+                score DESC
+       LIMIT 5`
     )
     .all() as unknown as JobItem[];
 
@@ -657,8 +710,9 @@ app.get('/api/dashboard', (req: Request, res: Response) => {
   const enrichedDailyPicks = dailyPickRows
     .map((job) => enrichJob(job, profile))
     .sort((a, b) => {
-      const tierDiff = (a.location_priority_tier ?? 4) - (b.location_priority_tier ?? 4);
-      if (tierDiff !== 0) return tierDiff;
+      const tierA = (a.location_priority_tier ?? 4) <= 2 ? (a.location_priority_tier ?? 4) : 3;
+      const tierB = (b.location_priority_tier ?? 4) <= 2 ? (b.location_priority_tier ?? 4) : 3;
+      if (tierA !== tierB) return tierA - tierB;
       return (b.jury_score || 0) - (a.jury_score || 0);
     });
 
@@ -827,17 +881,35 @@ app.get('/api/jury', (_req: Request, res: Response) => {
     )
     .all() as unknown as JobItem[];
 
-  const rejectedJobs = db
+  const dismissedJobs = db
     .prepare(
-      `SELECT * FROM jobs
-       WHERE status = 'dismissed'
-          OR jury_verdict LIKE 'REJECTED%'
-          OR jury_verdict LIKE 'CONSTRAINED%'
-          OR jury_verdict LIKE 'DEFERRED%'
-       ORDER BY CASE WHEN status = 'dismissed' THEN 0 ELSE 1 END, jury_score DESC, created_at DESC
-       LIMIT 16`
+      `SELECT * FROM jobs WHERE status = 'dismissed'
+       ORDER BY created_at DESC LIMIT 6`
     )
     .all() as unknown as JobItem[];
+
+  const languageRejectedJobs = db
+    .prepare(
+      `SELECT * FROM jobs
+       WHERE status != 'dismissed'
+         AND jury_verdict LIKE 'REJECTED — LANGUAGE%'
+       ORDER BY cv_score DESC, created_at DESC
+       LIMIT 6`
+    )
+    .all() as unknown as JobItem[];
+
+  const otherRejectedJobs = db
+    .prepare(
+      `SELECT * FROM jobs
+       WHERE status != 'dismissed'
+         AND (jury_verdict LIKE 'REJECTED%' OR jury_verdict LIKE 'CONSTRAINED%' OR jury_verdict LIKE 'DEFERRED%')
+         AND COALESCE(jury_verdict, '') NOT LIKE 'REJECTED — LANGUAGE%'
+       ORDER BY jury_score DESC, created_at DESC
+       LIMIT 8`
+    )
+    .all() as unknown as JobItem[];
+
+  const rejectedJobs = [...dismissedJobs, ...languageRejectedJobs, ...otherRejectedJobs];
 
   const seenIds = new Set<string>();
   const combinedJobs: JobItem[] = [];
