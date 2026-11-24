@@ -164,6 +164,33 @@ service cloud.firestore {
         data.updatedAt is timestamp;
     }
 
+    function isValidEmailPreference(data, userId, prefId) {
+      return data.keys().hasAll([
+          'ownerId', 'prefId', 'enabled', 'recipientEmail',
+          'lastSentDate', 'lastSubject', 'lastSentCount',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'prefId', 'enabled', 'recipientEmail',
+          'lastSentDate', 'lastSubject', 'lastSentCount',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.ownerId == userId &&
+        isValidId(data.ownerId) &&
+        data.prefId == prefId &&
+        isValidId(data.prefId) &&
+        data.enabled is bool &&
+        data.recipientEmail is string &&
+        data.recipientEmail.size() <= 254 &&
+        (data.recipientEmail.size() == 0 || data.recipientEmail.matches('^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$')) &&
+        data.lastSentDate is string && data.lastSentDate.size() <= 32 &&
+        data.lastSubject is string && data.lastSubject.size() <= 240 &&
+        (data.lastSentCount is int || data.lastSentCount is float) &&
+        data.lastSentCount >= 0 && data.lastSentCount <= 25 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
     match /users/{userId} {
       allow get: if isValidId(userId) && isOwner(userId);
       allow list: if isOwner(userId) && resource.data.ownerId == request.auth.uid;
@@ -300,6 +327,35 @@ service cloud.firestore {
           ]);
 
         allow delete: if isValidId(userId) && isValidId(decisionId) && isOwner(userId) && hasParentUserRoot(userId);
+      }
+
+      match /emailPreferences/{prefId} {
+        allow get: if isValidId(userId) && isValidId(prefId) && isOwner(userId) && hasParentUserRoot(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+
+        allow create: if isValidId(userId) &&
+          isValidId(prefId) &&
+          isOwner(userId) &&
+          hasParentUserRoot(userId) &&
+          isValidEmailPreference(incoming(), userId, prefId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+
+        allow update: if isValidId(userId) &&
+          isValidId(prefId) &&
+          isOwner(userId) &&
+          hasParentUserRoot(userId) &&
+          isValidEmailPreference(incoming(), userId, prefId) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().prefId == existing().prefId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'enabled', 'recipientEmail', 'lastSentDate',
+            'lastSubject', 'lastSentCount', 'updatedAt'
+          ]);
+
+        allow delete: if isValidId(userId) && isValidId(prefId) && isOwner(userId) && hasParentUserRoot(userId);
       }
     }
   }

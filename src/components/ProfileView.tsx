@@ -4,6 +4,7 @@ import type { CandidateProfile } from '../types.ts';
 import { useAuth } from '../contexts/AuthContext.tsx';
 import { syncProfileToCloud } from '../firebase.ts';
 import { buildExportResumeFromProfile, exportResumeToPdf } from '../utils/pdfExport.ts';
+import { CvSkillSuggester } from './CvSkillSuggester.tsx';
 
 interface ProfileViewProps {
   onNotify: (message: string) => void;
@@ -151,6 +152,34 @@ export function ProfileView({ onNotify, onProfileSaved }: ProfileViewProps) {
     const safeName = (name || 'candidate').trim().replace(/[^a-zA-Z0-9_-]+/g, '_');
     const filename = exportResumeToPdf(resumeData, 'executive', safeName, `${safeName}_CV.pdf`);
     onNotify(`Downloaded ${filename}.`);
+  };
+
+  const mergeSkillsIntoInput = (incomingNames: string[]) => {
+    const existingList = skills
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const seen = new Set(existingList.map((s) => s.toLowerCase()));
+    const added: string[] = [];
+
+    for (const rawName of incomingNames) {
+      const clean = rawName.trim();
+      if (!clean) continue;
+      const lower = clean.toLowerCase();
+      if (seen.has(lower)) continue;
+      seen.add(lower);
+      existingList.push(clean);
+      added.push(clean);
+    }
+
+    if (added.length > 0) {
+      setSkills(existingList.join(', '));
+      onNotify(
+        added.length === 1
+          ? `Added "${added[0]}" to Core Skills. Save profile to re-debate jobs.`
+          : `Added ${added.length} skills to Core Skills. Save profile to re-debate jobs.`
+      );
+    }
   };
 
   if (loading) {
@@ -359,16 +388,27 @@ export function ProfileView({ onNotify, onProfileSaved }: ProfileViewProps) {
           />
         </div>
 
-        <div>
-          <label htmlFor="profile-skills" className="block text-xs font-semibold text-slate-700 mb-1.5">
-            Core Skills (comma-separated)
-          </label>
-          <input
-            id="profile-skills"
-            type="text"
-            value={skills}
-            onChange={(e) => setSkills(e.target.value)}
-            className="w-full px-3.5 py-2 text-sm bg-white border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
+        <div className="space-y-3">
+          <div>
+            <label htmlFor="profile-skills" className="block text-xs font-semibold text-slate-700 mb-1.5">
+              Core Skills (comma-separated)
+            </label>
+            <input
+              id="profile-skills"
+              type="text"
+              value={skills}
+              onChange={(e) => setSkills(e.target.value)}
+              className="w-full px-3.5 py-2 text-sm bg-white border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
+            />
+          </div>
+
+          <CvSkillSuggester
+            cvText={cvText}
+            currentSkills={skills}
+            excludedSkills={excludedSkills}
+            targetRoles={targetRoles}
+            onAddSkill={(skillName) => mergeSkillsIntoInput([skillName])}
+            onAddAllSkills={(skillNames) => mergeSkillsIntoInput(skillNames)}
           />
         </div>
 

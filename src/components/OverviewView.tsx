@@ -3,15 +3,17 @@ import {
   ChevronRight,
   ExternalLink,
   FileText,
+  Mail,
   RefreshCw,
   Search,
   Star,
   ThumbsDown,
 } from 'lucide-react';
-import type { DashboardResponse, JobItem, JobStatus } from '../types.ts';
+import type { DashboardResponse, EmailDigestStatus, JobItem, JobStatus } from '../types.ts';
 import { AuthenticityLabel, LivenessLabel, PipelineStatusLabel } from './StatusText.tsx';
 import { CuteRadarWidget } from './CuteRadarWidget.tsx';
 import { DailyDigest } from './DailyDigest.tsx';
+import { DailyEmailPanel } from './DailyEmailPanel.tsx';
 import { formatJobSalaryBadge, SalaryRangeSlider } from './SalaryRangeSlider.tsx';
 
 interface OverviewViewProps {
@@ -43,6 +45,12 @@ interface OverviewViewProps {
   onTrackClick: (jobId: string, eventType?: 'click' | 'inspect' | 'open_link' | 'view_debate' | 'view_drafts') => void;
   onConveneJury: () => void;
   onNavigateTab: (tab: 'jury' | 'profile') => void;
+  emailStatus: EmailDigestStatus | null;
+  defaultEmail: string;
+  hasGmailPermission: boolean;
+  onConnectGmail: () => Promise<string | null>;
+  onSaveEmailPreferences: (enabled: boolean, recipientEmail: string) => Promise<void>;
+  onRequestEmailModal: () => void;
 }
 
 export function OverviewView({
@@ -74,6 +82,12 @@ export function OverviewView({
   onTrackClick,
   onConveneJury,
   onNavigateTab,
+  emailStatus,
+  defaultEmail,
+  hasGmailPermission,
+  onConnectGmail,
+  onSaveEmailPreferences,
+  onRequestEmailModal,
 }: OverviewViewProps) {
   const stats = data?.stats;
   const profile = data?.profile;
@@ -193,13 +207,23 @@ export function OverviewView({
               Top reachable vacancies approved after multi-agent cross-examination.
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => onNavigateTab('profile')}
-            className="text-xs font-semibold text-slate-600 hover:text-slate-900 hover:underline self-start sm:self-auto"
-          >
-            Adjust matching criteria →
-          </button>
+          <div className="flex flex-wrap items-center gap-3 self-start sm:self-auto">
+            <button
+              type="button"
+              onClick={onRequestEmailModal}
+              className="inline-flex items-center gap-1.5 text-xs font-semibold text-blue-700 hover:text-blue-800 hover:underline whitespace-nowrap"
+            >
+              <Mail className="w-3.5 h-3.5" aria-hidden="true" />
+              <span>Email Daily Picks</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigateTab('profile')}
+              className="text-xs font-semibold text-slate-600 hover:text-slate-900 hover:underline whitespace-nowrap"
+            >
+              Adjust matching criteria →
+            </button>
+          </div>
         </div>
 
         {loading && !data ? (
@@ -361,6 +385,17 @@ export function OverviewView({
         onOpenApplication={onOpenApplication}
         onTrackClick={onTrackClick}
         onNavigateJury={() => onNavigateTab('jury')}
+      />
+
+      {/* Daily Top Jury Job Picks Email Delivery */}
+      <DailyEmailPanel
+        status={emailStatus}
+        defaultEmail={defaultEmail}
+        hasGmailPermission={hasGmailPermission}
+        onConnectGmail={onConnectGmail}
+        onSavePreferences={onSaveEmailPreferences}
+        onRequestSendModal={onRequestEmailModal}
+        compact
       />
 
       {/* Master Opportunities Pipeline */}

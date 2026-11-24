@@ -317,6 +317,67 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "UserEmailPreference": {
+      "title": "UserEmailPreference",
+      "description": "Private daily Jury Top Picks Gmail delivery settings and delivery history metadata per user.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "prefId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether the user opted in to daily Jury job picks emails."
+        },
+        "recipientEmail": {
+          "type": "string",
+          "maxLength": 254,
+          "description": "Destination email address for daily Jury picks."
+        },
+        "lastSentDate": {
+          "type": "string",
+          "maxLength": 32,
+          "description": "YYYY-MM-DD date of the latest sent digest email."
+        },
+        "lastSubject": {
+          "type": "string",
+          "maxLength": 240,
+          "description": "Subject line of the latest sent digest email."
+        },
+        "lastSentCount": {
+          "type": "number",
+          "description": "Number of Jury job picks included in the latest email (0..25)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "prefId",
+        "enabled",
+        "recipientEmail",
+        "lastSentDate",
+        "lastSubject",
+        "lastSentCount",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -339,6 +400,10 @@
     "/users/{userId}/juryDecisions/{decisionId}": {
       "schema": { "$ref": "#/entities/UserJuryDecision" },
       "description": "Chronological Jury decision snapshots tracking job matches and score trends over time."
+    },
+    "/users/{userId}/emailPreferences/{prefId}": {
+      "schema": { "$ref": "#/entities/UserEmailPreference" },
+      "description": "Private user email digest preferences and daily send checkpoints."
     }
   }
 }

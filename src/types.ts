@@ -26,6 +26,12 @@ export interface CvAnalysis {
   summary: string;
 }
 
+export interface GeminiSkillSuggestion {
+  name: string;
+  category: string;
+  reason: string;
+}
+
 export interface JobItem {
   id: string;
   title: string;
@@ -215,6 +221,28 @@ export interface SettingsResponse {
   liveCount: number;
   sources: Array<{ source: string; count: number }>;
   latestDeliberation: DeliberationSession | null;
+}
+
+export interface UserEmailPreference {
+  enabled: boolean;
+  recipientEmail: string;
+  lastSentDate: string;
+  lastSubject: string;
+  lastSentCount: number;
+}
+
+export interface EmailDigestStatus {
+  enabled: boolean;
+  recipientEmail: string;
+  lastSentDate: string;
+  lastSentAt: string;
+  lastSentCount: number;
+  lastSubject: string;
+  lastError: string;
+  todayDate: string;
+  dueToday: boolean;
+  previewSubject: string;
+  topPicks: JobItem[];
 }
 
 export const REJECTION_REASONS: Record<string, string> = {

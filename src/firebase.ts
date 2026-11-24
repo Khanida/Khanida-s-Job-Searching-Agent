@@ -21,7 +21,7 @@ import {
   where,
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
-import type { CandidateProfile, LearnedWeight } from './types.ts';
+import type { CandidateProfile, LearnedWeight, UserEmailPreference } from './types.ts';
 
 export interface JuryDecisionRecord {
   sessionId: string;
@@ -37,11 +37,28 @@ export interface JuryDecisionRecord {
   createdAtMs?: number;
 }
 
+export const WORKSPACE_SCOPES = ['https://www.googleapis.com/auth/gmail.send'] as const;
+
 const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+const configuredDatabaseId = (firebaseConfig as { firestoreDatabaseId?: string }).firestoreDatabaseId;
+export const db = configuredDatabaseId ? getFirestore(app, configuredDatabaseId) : getFirestore(app);
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
+WORKSPACE_SCOPES.forEach((scope) => {
+  googleProvider.addScope(scope);
+});
 googleProvider.setCustomParameters({ prompt: 'select_account' });
+
+// Strictly in-memory OAuth access token cache (never stored in localStorage/sessionStorage)
+let cachedGmailAccessToken: string | null = null;
+
+export function getCachedGmailAccessToken(): string | null {
+  return cachedGmailAccessToken;
+}
+
+export function clearCachedGmailAccessToken(): void {
+  cachedGmailAccessToken = null;
+}
 
 export enum OperationType {
   CREATE = 'create',
@@ -106,11 +123,30 @@ async function testConnection() {
 }
 void testConnection();
 
-export async function signInWithGooglePopup() {
-  return signInWithPopup(auth, googleProvider);
+export async function signInWithGooglePopup(options?: { loginHint?: string | null; forceConsent?: boolean }) {
+  const provider = new GoogleAuthProvider();
+  WORKSPACE_SCOPES.forEach((scope) => {
+    provider.addScope(scope);
+  });
+  const params: Record<string, string> = {
+    prompt: options?.forceConsent ? 'consent select_account' : 'select_account',
+  };
+  if (options?.loginHint) {
+    params.login_hint = options.loginHint;
+  }
+  provider.setCustomParameters(params);
+
+  const result = await signInWithPopup(auth, provider);
+  const credential = GoogleAuthProvider.credentialFromResult(result);
+  cachedGmailAccessToken = credential?.accessToken || null;
+  return {
+    user: result.user,
+    accessToken: cachedGmailAccessToken,
+  };
 }
 
 export async function signOutAccount() {
+  cachedGmailAccessToken = null;
   return signOut(auth);
 }
 
@@ -335,6 +371,7 @@ export async function fetchUserWorkspaceFromCloud(uid: string): Promise<{
     negative_hits: number;
   }>;
   juryDecisionsCount: number;
+  emailPreference: UserEmailPreference | null;
 }> {
   const userPath = `users/${uid}`;
   let profile: Partial<CandidateProfile> | null = null;
@@ -431,7 +468,64 @@ export async function fetchUserWorkspaceFromCloud(uid: string): Promise<{
     handleFirestoreError(error, OperationType.LIST, decisionsPath);
   }
 
-  return { profile, jobActions, applications, learnedWeights, juryDecisionsCount };
+  let emailPreference: UserEmailPreference | null = null;
+  const emailPrefPath = `users/${uid}/emailPreferences/daily_jury_picks`;
+  try {
+    const prefSnap = await getDoc(doc(db, 'users', uid, 'emailPreferences', 'daily_jury_picks'));
+    if (prefSnap.exists()) {
+      const d = prefSnap.data();
+      emailPreference = {
+        enabled: Boolean(d.enabled),
+        recipientEmail: String(d.recipientEmail || ''),
+        lastSentDate: String(d.lastSentDate || ''),
+        lastSubject: String(d.lastSubject || ''),
+        lastSentCount: Number(d.lastSentCount || 0),
+      };
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, emailPrefPath);
+  }
+
+  return { profile, jobActions, applications, learnedWeights, juryDecisionsCount, emailPreference };
+}
+
+export async function syncEmailPreferenceToCloud(
+  uid: string,
+  pref: UserEmailPreference
+): Promise<void> {
+  await ensureUserRootDoc(uid);
+  const prefId = 'daily_jury_picks';
+  const path = `users/${uid}/emailPreferences/${prefId}`;
+  const ref = doc(db, 'users', uid, 'emailPreferences', prefId);
+
+  const emailCandidate = clampStr(pref.recipientEmail.trim(), 254);
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const safeEmail = emailCandidate && emailRegex.test(emailCandidate) ? emailCandidate : '';
+
+  const mutableFields = {
+    enabled: Boolean(pref.enabled) && Boolean(safeEmail),
+    recipientEmail: safeEmail,
+    lastSentDate: clampStr(pref.lastSentDate, 32),
+    lastSubject: clampStr(pref.lastSubject, 240),
+    lastSentCount: clampNum(pref.lastSentCount, 0, 25),
+    updatedAt: serverTimestamp(),
+  };
+
+  try {
+    const snap = await getDoc(ref);
+    if (!snap.exists()) {
+      await setDoc(ref, {
+        ownerId: uid,
+        prefId,
+        ...mutableFields,
+        createdAt: serverTimestamp(),
+      });
+    } else {
+      await updateDoc(ref, mutableFields);
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
 }
 
 function clampNum(val: unknown, min: number, max: number): number {

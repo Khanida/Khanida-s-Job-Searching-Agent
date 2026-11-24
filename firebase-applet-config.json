@@ -1,12 +1,11 @@
 {
-  "projectId": "windy-dragon-jc62s",
-  "appId": "1:544464708615:web:33671a8d52b27c600bb6a2",
-  "apiKey": "AIzaSyDYEHfJ5zUvfMSmHLriCxDPch7VlhRFiHE",
-  "authDomain": "windy-dragon-jc62s.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-adeenasjobagent-3d0a55e7-a0b6-4261-a90d-fb7b136c8902",
-  "storageBucket": "windy-dragon-jc62s.firebasestorage.app",
-  "messagingSenderId": "544464708615",
+  "projectId": "gen-lang-client-0974614335",
+  "appId": "1:521721158720:web:1ad9f706395aa4162f13a5",
+  "apiKey": "AIzaSyD_F2wtVfVOEvIT36bU7wtfjwW_i5EN9Os",
+  "authDomain": "gen-lang-client-0974614335.firebaseapp.com",
+  "storageBucket": "gen-lang-client-0974614335.firebasestorage.app",
+  "messagingSenderId": "521721158720",
   "measurementId": "",
-  "oAuthClientId": "544464708615-6f3nvb0hvgmkm97ni4sr89jeqrgnetcj.apps.googleusercontent.com",
+  "oAuthClientId": "521721158720-vbj01u487j3pa830v69vdddvdn9tq893.apps.googleusercontent.com",
   "recaptchaSiteKey": ""
 }

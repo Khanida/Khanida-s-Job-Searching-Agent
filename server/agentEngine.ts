@@ -29,6 +29,76 @@ export const REJECTION_REASON_LABELS: Record<string, string> = {
   other: 'Other reason',
 };
 
+const TRACKING_QUERY_PARAMS = new Set([
+  'utm_source',
+  'utm_medium',
+  'utm_campaign',
+  'utm_term',
+  'utm_content',
+  'ref',
+  'source',
+  'fbclid',
+  'gclid',
+  'trk',
+  'src',
+]);
+
+export function canonicalJobUrl(rawUrl: string | null | undefined): string {
+  const s = String(rawUrl || '').trim();
+  if (!s) return '';
+  try {
+    const u = new URL(s);
+    const kept = new URLSearchParams();
+    const sortedKeys = Array.from(u.searchParams.keys()).sort();
+    for (const k of sortedKeys) {
+      if (!TRACKING_QUERY_PARAMS.has(k.toLowerCase())) {
+        const vals = u.searchParams.getAll(k);
+        for (const v of vals) kept.append(k, v);
+      }
+    }
+    const qs = kept.toString();
+    const cleanPath = u.pathname.replace(/\/+$/, '').toLowerCase();
+    const host = u.hostname.replace(/^www\./, '').toLowerCase();
+    return `${host}${cleanPath}${qs ? `?${qs}` : ''}`;
+  } catch {
+    return s.toLowerCase().replace(/\/+$/, '');
+  }
+}
+
+export function jobDedupeKeys(job: Partial<JobItem>): { titleCompanyKey: string; urlKey: string } {
+  const norm = (val: string | null | undefined) =>
+    String(val || '')
+      .toLowerCase()
+      .replace(/&amp;/g, 'and')
+      .replace(/\(m\/w\/d\)|\(f\/m\/d\)|\(m\/f\/d\)|\(gn\)/gi, ' ')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
+  const titleNorm = norm(job.title);
+  const companyNorm = norm(job.company);
+  const titleCompanyKey =
+    titleNorm && companyNorm ? `${companyNorm}::${titleNorm}` : titleNorm || String(job.id || '');
+  return {
+    titleCompanyKey,
+    urlKey: canonicalJobUrl(job.url),
+  };
+}
+
+export function collectHandledJobSignatures(jobs: Partial<JobItem>[]): {
+  handledTitleCompanyKeys: Set<string>;
+  handledUrlKeys: Set<string>;
+} {
+  const handledTitleCompanyKeys = new Set<string>();
+  const handledUrlKeys = new Set<string>();
+  for (const job of jobs) {
+    if (job.status === 'dismissed' || job.status === 'shortlisted' || job.status === 'applied') {
+      const { titleCompanyKey, urlKey } = jobDedupeKeys(job);
+      if (titleCompanyKey) handledTitleCompanyKeys.add(titleCompanyKey);
+      if (urlKey) handledUrlKeys.add(urlKey);
+    }
+  }
+  return { handledTitleCompanyKeys, handledUrlKeys };
+}
+
 const KNOWN_SKILLS = [
   'Python',
   'C++',
@@ -1684,9 +1754,11 @@ export function runJuryDeliberation(
   }
 
   const evaluated: ScoredCandidate[] = [];
+  const { handledTitleCompanyKeys, handledUrlKeys } = collectHandledJobSignatures(jobs);
 
   for (const job of jobs) {
     const isDismissed = job.status === 'dismissed';
+    const isShortlistedOrApplied = job.status === 'shortlisted' || job.status === 'applied';
 
     const cvMatch = scoreCvMatch(profile, job);
     const { boost, reasons } = computeLearnedBoost(db, job);
@@ -1724,8 +1796,15 @@ export function runJuryDeliberation(
     }
     const finalScore = Math.max(10, Math.min(98, rawScore));
 
+    const dedupe = jobDedupeKeys(job);
+    const matchesHandledDuplicate =
+      handledTitleCompanyKeys.has(dedupe.titleCompanyKey) ||
+      (dedupe.urlKey ? handledUrlKeys.has(dedupe.urlKey) : false);
+
     const eligibleForDaily =
       !isDismissed &&
+      !isShortlistedOrApplied &&
+      !matchesHandledDuplicate &&
       isLive &&
       constraintPass &&
       job.authenticity_status !== 'suspicious' &&
@@ -1870,12 +1949,19 @@ export function runJuryDeliberation(
     return b.finalScore - a.finalScore;
   });
 
-  const crownedIds = new Set(
-    evaluated
-      .filter((e) => e.eligibleForDaily)
-      .slice(0, 5)
-      .map((e) => e.job.id)
-  );
+  const crownedIds = new Set<string>();
+  const crownedTitleCompanyKeys = new Set<string>();
+  const crownedUrlKeys = new Set<string>();
+  for (const candidate of evaluated) {
+    if (!candidate.eligibleForDaily) continue;
+    const keys = jobDedupeKeys(candidate.job);
+    if (crownedTitleCompanyKeys.has(keys.titleCompanyKey)) continue;
+    if (keys.urlKey && crownedUrlKeys.has(keys.urlKey)) continue;
+    crownedTitleCompanyKeys.add(keys.titleCompanyKey);
+    if (keys.urlKey) crownedUrlKeys.add(keys.urlKey);
+    crownedIds.add(candidate.job.id);
+    if (crownedIds.size >= 5) break;
+  }
 
   // Persist rich transcripts for top 35 approved/active + dismissed + diverse rejected (language mismatch, seniority, other) roles
   const nonEligible = evaluated.filter((e) => !e.eligibleForDaily);
@@ -1969,7 +2055,9 @@ export function recalibrateScoresFromWeights(
     weightMap.set(`${row.feature_type}::${row.feature_value}`, row.score_delta);
   }
 
+  const { handledTitleCompanyKeys, handledUrlKeys } = collectHandledJobSignatures(jobs);
   const scored: Array<{
+    job: JobItem;
     id: string;
     finalScore: number;
     cvScore: number;
@@ -1980,6 +2068,7 @@ export function recalibrateScoresFromWeights(
 
   for (const job of jobs) {
     const isDismissed = job.status === 'dismissed';
+    const isShortlistedOrApplied = job.status === 'shortlisted' || job.status === 'applied';
     const cvMatch = scoreCvMatch(profile, job);
     const hasCvEvidence = cvMatch.matchedSkills.length >= 1 || cvMatch.matchedRoles.length >= 1;
 
@@ -2021,8 +2110,15 @@ export function recalibrateScoresFromWeights(
     }
     const finalScore = Math.max(10, Math.min(98, rawScore));
 
+    const dedupe = jobDedupeKeys(job);
+    const matchesHandledDuplicate =
+      handledTitleCompanyKeys.has(dedupe.titleCompanyKey) ||
+      (dedupe.urlKey ? handledUrlKeys.has(dedupe.urlKey) : false);
+
     const eligible =
       !isDismissed &&
+      !isShortlistedOrApplied &&
+      !matchesHandledDuplicate &&
       isLive &&
       constraintPass &&
       job.authenticity_status !== 'suspicious' &&
@@ -2030,6 +2126,7 @@ export function recalibrateScoresFromWeights(
       hasCvEvidence;
 
     scored.push({
+      job,
       id: job.id,
       finalScore,
       cvScore: cvMatch.score,
@@ -2047,7 +2144,19 @@ export function recalibrateScoresFromWeights(
     return b.finalScore - a.finalScore;
   });
 
-  const pickIds = new Set(scored.filter((s) => s.eligible).slice(0, 5).map((s) => s.id));
+  const pickIds = new Set<string>();
+  const pickKeys = new Set<string>();
+  const pickUrls = new Set<string>();
+  for (const s of scored) {
+    if (!s.eligible) continue;
+    const keys = jobDedupeKeys(s.job);
+    if (pickKeys.has(keys.titleCompanyKey)) continue;
+    if (keys.urlKey && pickUrls.has(keys.urlKey)) continue;
+    pickKeys.add(keys.titleCompanyKey);
+    if (keys.urlKey) pickUrls.add(keys.urlKey);
+    pickIds.add(s.id);
+    if (pickIds.size >= 5) break;
+  }
   const updateStmt = db.prepare(
     'UPDATE jobs SET jury_score=?, score=?, is_daily_pick=?, location_priority_tier=?, cv_score=?, seniority_blocked=? WHERE id=?'
   );

@@ -12,10 +12,12 @@ import { createServer as createViteServer } from 'vite';
 import {
   analyzeCv,
   buildDocxBuffer,
+  collectHandledJobSignatures,
   computeLearnedBoost,
   evaluateLocationPriority,
   generateApplicationMaterials,
   googleCareersSearchUrl,
+  jobDedupeKeys,
   parseCvSections,
   REJECTION_REASON_LABELS,
   recalibrateScoresFromWeights,
@@ -24,14 +26,23 @@ import {
   sanitizeCvText,
 } from './server/agentEngine.ts';
 import { extractSalaryInfo, syncAllJobSources } from './server/jobSources.ts';
+import {
+  buildDailyJuryDigestEmail,
+  isValidRecipientEmail,
+  sanitizeHeaderValue,
+  sendGmailRawMessage,
+} from './server/emailDigest.ts';
+import { suggestTopSkillsFromCv } from './server/geminiClient.ts';
 import type {
   AgentArgument,
   ApplicationDraft,
   CandidateProfile,
   DeliberationSession,
+  EmailDigestStatus,
   JobItem,
   JuryVerdict,
   LearnedWeight,
+  UserEmailPreference,
 } from './src/types.ts';
 
 const PORT = Number(process.env.PORT || 3000);
@@ -88,6 +99,17 @@ function ensureSchema() {
       feature_type TEXT, feature_value TEXT, score_delta REAL DEFAULT 0,
       positive_hits INTEGER DEFAULT 0, negative_hits INTEGER DEFAULT 0, updated_at TEXT,
       PRIMARY KEY (feature_type, feature_value)
+    );
+    CREATE TABLE IF NOT EXISTS email_preferences (
+      id INTEGER PRIMARY KEY CHECK(id=1),
+      enabled INTEGER DEFAULT 0,
+      recipient_email TEXT DEFAULT '',
+      last_sent_date TEXT DEFAULT '',
+      last_sent_at TEXT DEFAULT '',
+      last_sent_count INTEGER DEFAULT 0,
+      last_subject TEXT DEFAULT '',
+      last_error TEXT DEFAULT '',
+      updated_at TEXT DEFAULT ''
     );
   `);
 
@@ -226,7 +248,7 @@ function getStats() {
     (
       db
         .prepare(
-          `SELECT COUNT(*) as c FROM jobs WHERE is_daily_pick=1 AND status != 'dismissed' AND ${NOT_EXPIRED_LIVENESS_SQL}`
+          `SELECT COUNT(*) as c FROM jobs WHERE is_daily_pick=1 AND status = 'new' AND ${NOT_EXPIRED_LIVENESS_SQL}`
         )
         .get() as { c: number }
     ).c
@@ -407,6 +429,13 @@ function getDailyDigest() {
     recommendation: string | null;
   }> = [];
 
+  const handledRows = db
+    .prepare("SELECT id, title, company, url, status FROM jobs WHERE status IN ('dismissed', 'shortlisted', 'applied')")
+    .all() as unknown as JobItem[];
+  const { handledTitleCompanyKeys, handledUrlKeys } = collectHandledJobSignatures(handledRows);
+  const seenKeys = new Set<string>(handledTitleCompanyKeys);
+  const seenUrls = new Set<string>(handledUrlKeys);
+
   const primaryDelibId = primaryDelib?.id || null;
   if (primaryDelibId && delibIds.length > 0) {
     const placeholders = delibIds.map(() => '?').join(',');
@@ -423,7 +452,7 @@ function getDailyDigest() {
          FROM jury_verdicts v
          INNER JOIN jobs j ON j.id = v.job_id
          WHERE v.deliberation_id IN (${placeholders})
-           AND j.status != 'dismissed'
+           AND j.status = 'new'
            AND ${NOT_EXPIRED_LIVENESS_SQL}
            AND COALESCE(j.seniority_blocked, 0) = 0
            AND COALESCE(j.cv_score, 0) >= 35
@@ -447,7 +476,13 @@ function getDailyDigest() {
     const seenJobs = new Set<string>();
     for (const row of joined) {
       if (seenJobs.has(row.id)) continue;
+      const keys = jobDedupeKeys(row);
+      if (seenKeys.has(keys.titleCompanyKey)) continue;
+      if (keys.urlKey && seenUrls.has(keys.urlKey)) continue;
       seenJobs.add(row.id);
+      seenKeys.add(keys.titleCompanyKey);
+      if (keys.urlKey) seenUrls.add(keys.urlKey);
+
       const { v_consensus_score, v_verdict, v_strengths, v_recommendation, v_delib_id: _d, ...jobFields } = row;
       digestRows.push({
         job: jobFields as JobItem,
@@ -465,18 +500,23 @@ function getDailyDigest() {
     const fallbackJobs = db
       .prepare(
         `SELECT * FROM jobs
-         WHERE status != 'dismissed'
+         WHERE status = 'new'
            AND ${NOT_EXPIRED_LIVENESS_SQL}
            AND COALESCE(seniority_blocked, 0) = 0
            AND COALESCE(cv_score, 0) >= 35
          ORDER BY is_daily_pick DESC, COALESCE(location_priority_tier, 4) ASC, jury_score DESC, score DESC
-         LIMIT 10`
+         LIMIT 25`
       )
       .all() as unknown as JobItem[];
 
     for (const fj of fallbackJobs) {
       if (excludeIds.has(fj.id)) continue;
+      const keys = jobDedupeKeys(fj);
+      if (seenKeys.has(keys.titleCompanyKey)) continue;
+      if (keys.urlKey && seenUrls.has(keys.urlKey)) continue;
       excludeIds.add(fj.id);
+      seenKeys.add(keys.titleCompanyKey);
+      if (keys.urlKey) seenUrls.add(keys.urlKey);
       digestRows.push({
         job: fj,
         consensus_score: Number(fj.jury_score || fj.score || 0),
@@ -683,12 +723,12 @@ app.get('/api/dashboard', (req: Request, res: Response) => {
 
   const dailyPickRows = db
     .prepare(
-      `SELECT * FROM jobs WHERE is_daily_pick = 1 AND status != 'dismissed' AND ${NOT_EXPIRED_LIVENESS_SQL}
+      `SELECT * FROM jobs WHERE is_daily_pick = 1 AND status = 'new' AND ${NOT_EXPIRED_LIVENESS_SQL}
        ORDER BY CASE WHEN COALESCE(location_priority_tier, 4) <= 2 THEN COALESCE(location_priority_tier, 4) ELSE 3 END ASC,
                 jury_score DESC,
                 cv_score DESC,
                 score DESC
-       LIMIT 5`
+       LIMIT 15`
     )
     .all() as unknown as JobItem[];
 
@@ -706,8 +746,25 @@ app.get('/api/dashboard', (req: Request, res: Response) => {
     )
     .get() as { disclosedCount: number; minAvailable: number; maxAvailable: number };
 
+  const handledForPicks = db
+    .prepare("SELECT id, title, company, url, status FROM jobs WHERE status IN ('dismissed', 'shortlisted', 'applied')")
+    .all() as unknown as JobItem[];
+  const { handledTitleCompanyKeys: pickHandledKeys, handledUrlKeys: pickHandledUrls } =
+    collectHandledJobSignatures(handledForPicks);
+  const seenDailyKeys = new Set<string>(pickHandledKeys);
+  const seenDailyUrls = new Set<string>(pickHandledUrls);
+
   const profile = getProfileRow();
   const enrichedDailyPicks = dailyPickRows
+    .filter((job) => {
+      const keys = jobDedupeKeys(job);
+      if (seenDailyKeys.has(keys.titleCompanyKey)) return false;
+      if (keys.urlKey && seenDailyUrls.has(keys.urlKey)) return false;
+      seenDailyKeys.add(keys.titleCompanyKey);
+      if (keys.urlKey) seenDailyUrls.add(keys.urlKey);
+      return true;
+    })
+    .slice(0, 5)
     .map((job) => enrichJob(job, profile))
     .sort((a, b) => {
       const tierA = (a.location_priority_tier ?? 4) <= 2 ? (a.location_priority_tier ?? 4) : 3;
@@ -875,7 +932,7 @@ app.get('/api/jury', (_req: Request, res: Response) => {
 
   const activeJobs = db
     .prepare(
-      `SELECT * FROM jobs WHERE status != 'dismissed'
+      `SELECT * FROM jobs WHERE status = 'new'
        ORDER BY is_daily_pick DESC, jury_score DESC, score DESC
        LIMIT 24`
     )
@@ -1158,6 +1215,41 @@ app.post('/api/profile', (req: Request, res: Response) => {
   });
 });
 
+app.post('/api/profile/suggest-skills', async (req: Request, res: Response) => {
+  const current = getProfileRow();
+  const rawCvText = typeof req.body?.cvText === 'string' ? req.body.cvText : current.cv_text;
+  const existingSkills =
+    typeof req.body?.existingSkills === 'string' ? req.body.existingSkills : current.skills;
+  const excludedSkills =
+    typeof req.body?.excludedSkills === 'string'
+      ? req.body.excludedSkills
+      : current.excluded_skills;
+  const targetRoles =
+    typeof req.body?.targetRoles === 'string' ? req.body.targetRoles : current.target_roles;
+
+  const cvText = sanitizeCvText(rawCvText || '');
+
+  try {
+    const suggestions = await suggestTopSkillsFromCv({
+      cvText,
+      existingSkills: existingSkills || '',
+      excludedSkills: excludedSkills || '',
+      targetRoles: targetRoles || '',
+    });
+    res.json({
+      ok: true,
+      suggestions,
+    });
+  } catch (err) {
+    const statusProp = (err as { status?: number })?.status;
+    const httpStatus =
+      typeof statusProp === 'number' && statusProp >= 400 && statusProp < 600 ? statusProp : 502;
+    res.status(httpStatus).json({
+      error: err instanceof Error ? err.message : 'Unable to identify CV skills with Gemini.',
+    });
+  }
+});
+
 function decodePdfStreamText(source: string): string[] {
   const chunks: string[] = [];
   const literalRx = /\(([^()\\]*(?:\\.[^()\\]*)*)\)\s*(?:Tj|'|")/g;
@@ -1345,7 +1437,7 @@ app.post('/api/workspace/hydrate', (req: Request, res: Response) => {
   const cloudApps = Array.isArray(req.body?.applications)
     ? (req.body.applications as Array<{ jobId: string; tailored_cv: string; cover_letter: string }>)
     : [];
-  const cloudWeights = Array.isArray(req.body?.learnedWeights)
+    const cloudWeights = Array.isArray(req.body?.learnedWeights)
     ? (req.body.learnedWeights as Array<{
         feature_type: string;
         feature_value: string;
@@ -1354,6 +1446,7 @@ app.post('/api/workspace/hydrate', (req: Request, res: Response) => {
         negative_hits: number;
       }>)
     : [];
+  const cloudEmailPref = req.body?.emailPreference as Partial<UserEmailPreference> | null | undefined;
 
   const nowIso = new Date().toISOString();
 
@@ -1428,6 +1521,33 @@ app.post('/api/workspace/hydrate', (req: Request, res: Response) => {
           nowIso
         );
       }
+    }
+
+    if (cloudEmailPref && typeof cloudEmailPref === 'object') {
+      const cleanEmail = sanitizeHeaderValue(cloudEmailPref.recipientEmail || '', 254);
+      const validOrEmptyEmail = !cleanEmail || isValidRecipientEmail(cleanEmail) ? cleanEmail : '';
+      db.prepare(`
+        INSERT INTO email_preferences (
+          id, enabled, recipient_email, last_sent_date, last_sent_at,
+          last_sent_count, last_subject, last_error, updated_at
+        )
+        VALUES (1, ?, ?, ?, ?, ?, ?, '', ?)
+        ON CONFLICT(id) DO UPDATE SET
+          enabled = excluded.enabled,
+          recipient_email = CASE WHEN excluded.recipient_email != '' THEN excluded.recipient_email ELSE email_preferences.recipient_email END,
+          last_sent_date = CASE WHEN excluded.last_sent_date != '' THEN excluded.last_sent_date ELSE email_preferences.last_sent_date END,
+          last_sent_count = CASE WHEN excluded.last_sent_count > 0 THEN excluded.last_sent_count ELSE email_preferences.last_sent_count END,
+          last_subject = CASE WHEN excluded.last_subject != '' THEN excluded.last_subject ELSE email_preferences.last_subject END,
+          updated_at = excluded.updated_at
+      `).run(
+        cloudEmailPref.enabled ? 1 : 0,
+        validOrEmptyEmail,
+        sanitizeHeaderValue(cloudEmailPref.lastSentDate || '', 32),
+        '',
+        Math.max(0, Math.min(25, Number(cloudEmailPref.lastSentCount || 0))),
+        sanitizeHeaderValue(cloudEmailPref.lastSubject || '', 240),
+        nowIso
+      );
     }
 
     db.exec('COMMIT');
@@ -1506,6 +1626,269 @@ app.post('/api/training/reset', (_req: Request, res: Response) => {
     ok: true,
     message: 'Learned agent memory reset to initial calibration.',
   });
+});
+
+function getEmailPreferenceRow(): {
+  enabled: number;
+  recipient_email: string;
+  last_sent_date: string;
+  last_sent_at: string;
+  last_sent_count: number;
+  last_subject: string;
+  last_error: string;
+  updated_at: string;
+} {
+  let row = db.prepare('SELECT * FROM email_preferences WHERE id=1').get() as
+    | {
+        enabled: number;
+        recipient_email: string;
+        last_sent_date: string;
+        last_sent_at: string;
+        last_sent_count: number;
+        last_subject: string;
+        last_error: string;
+        updated_at: string;
+      }
+    | undefined;
+
+  if (!row) {
+    const nowIso = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO email_preferences (
+         id, enabled, recipient_email, last_sent_date, last_sent_at,
+         last_sent_count, last_subject, last_error, updated_at
+       ) VALUES (1, 0, '', '', '', 0, '', '', ?)`
+    ).run(nowIso);
+    row = db.prepare('SELECT * FROM email_preferences WHERE id=1').get() as typeof row;
+  }
+  return row!;
+}
+
+function getTopEmailPicks(profile: CandidateProfile): JobItem[] {
+  const handledRows = db
+    .prepare("SELECT id, title, company, url, status FROM jobs WHERE status IN ('dismissed', 'shortlisted', 'applied')")
+    .all() as unknown as JobItem[];
+  const { handledTitleCompanyKeys, handledUrlKeys } = collectHandledJobSignatures(handledRows);
+  const seenKeys = new Set<string>(handledTitleCompanyKeys);
+  const seenUrls = new Set<string>(handledUrlKeys);
+  const seenIds = new Set<string>();
+
+  const dailyRows = db
+    .prepare(
+      `SELECT * FROM jobs
+       WHERE is_daily_pick = 1 AND status = 'new' AND ${NOT_EXPIRED_LIVENESS_SQL}
+       ORDER BY CASE WHEN COALESCE(location_priority_tier, 4) <= 2 THEN COALESCE(location_priority_tier, 4) ELSE 3 END ASC,
+                jury_score DESC, cv_score DESC, score DESC
+       LIMIT 15`
+    )
+    .all() as unknown as JobItem[];
+
+  const combined: JobItem[] = [];
+  for (const row of dailyRows) {
+    if (seenIds.has(row.id)) continue;
+    const keys = jobDedupeKeys(row);
+    if (seenKeys.has(keys.titleCompanyKey)) continue;
+    if (keys.urlKey && seenUrls.has(keys.urlKey)) continue;
+    seenIds.add(row.id);
+    seenKeys.add(keys.titleCompanyKey);
+    if (keys.urlKey) seenUrls.add(keys.urlKey);
+    combined.push(row);
+    if (combined.length >= 5) break;
+  }
+
+  if (combined.length < 5) {
+    const extras = db
+      .prepare(
+        `SELECT * FROM jobs
+         WHERE status = 'new'
+           AND ${NOT_EXPIRED_LIVENESS_SQL}
+           AND COALESCE(seniority_blocked, 0) = 0
+           AND COALESCE(cv_score, 0) >= 35
+         ORDER BY CASE WHEN COALESCE(location_priority_tier, 4) <= 2 THEN COALESCE(location_priority_tier, 4) ELSE 3 END ASC,
+                  jury_score DESC, cv_score DESC, score DESC
+         LIMIT 30`
+      )
+      .all() as unknown as JobItem[];
+
+    for (const row of extras) {
+      if (seenIds.has(row.id)) continue;
+      const keys = jobDedupeKeys(row);
+      if (seenKeys.has(keys.titleCompanyKey)) continue;
+      if (keys.urlKey && seenUrls.has(keys.urlKey)) continue;
+      seenIds.add(row.id);
+      seenKeys.add(keys.titleCompanyKey);
+      if (keys.urlKey) seenUrls.add(keys.urlKey);
+      combined.push(row);
+      if (combined.length >= 5) break;
+    }
+  }
+
+  return combined.map((job) => enrichJob(job, profile));
+}
+
+function getEmailStatusPayload(): EmailDigestStatus {
+  const row = getEmailPreferenceRow();
+  const profile = getProfileRow();
+  const topPicks = getTopEmailPicks(profile);
+  const todayDate = new Date().toISOString().slice(0, 10);
+  const enabled = Boolean(row.enabled);
+  const topTitle = topPicks[0]?.title ? ` — Top Pick: ${sanitizeHeaderValue(topPicks[0].title, 60)}` : '';
+  const previewSubject = sanitizeHeaderValue(
+    `Adeena's Job Agent · Daily Jury Top ${topPicks.length} Picks (${todayDate})${topTitle}`,
+    220
+  );
+
+  return {
+    enabled,
+    recipientEmail: row.recipient_email || '',
+    lastSentDate: row.last_sent_date || '',
+    lastSentAt: row.last_sent_at || '',
+    lastSentCount: Number(row.last_sent_count || 0),
+    lastSubject: row.last_subject || '',
+    lastError: row.last_error || '',
+    todayDate,
+    dueToday: enabled && Boolean(row.recipient_email) && row.last_sent_date !== todayDate && topPicks.length > 0,
+    previewSubject,
+    topPicks,
+  };
+}
+
+app.get('/api/email/status', (_req: Request, res: Response) => {
+  res.json(getEmailStatusPayload());
+});
+
+app.post('/api/email/preferences', (req: Request, res: Response) => {
+  const enabled = Boolean(req.body?.enabled);
+  const rawEmail = typeof req.body?.recipientEmail === 'string' ? req.body.recipientEmail.trim() : '';
+
+  if (rawEmail && !isValidRecipientEmail(rawEmail)) {
+    res.status(400).json({ error: 'Please provide a valid recipient email address.' });
+    return;
+  }
+  if (enabled && !isValidRecipientEmail(rawEmail)) {
+    res.status(400).json({ error: 'A valid recipient email address is required to enable daily email alerts.' });
+    return;
+  }
+
+  const nowIso = new Date().toISOString();
+  getEmailPreferenceRow();
+  db.prepare(
+    `UPDATE email_preferences
+     SET enabled=?, recipient_email=?, last_error='', updated_at=?
+     WHERE id=1`
+  ).run(enabled ? 1 : 0, sanitizeHeaderValue(rawEmail, 254), nowIso);
+
+  const status = getEmailStatusPayload();
+  res.json({
+    ok: true,
+    status,
+    message: enabled
+      ? `Daily Jury email digest enabled for ${rawEmail}.`
+      : 'Daily Jury email digest paused.',
+  });
+});
+
+app.post('/api/email/send-daily-picks', async (req: Request, res: Response) => {
+  const authHeader = String(req.headers.authorization || '').trim();
+  const bearerMatch = /^Bearer\s+(.+)$/i.exec(authHeader);
+  const accessToken = bearerMatch?.[1]?.trim() || '';
+
+  if (!accessToken || /[\r\n\s]/.test(accessToken)) {
+    res.status(401).json({
+      error: 'Google Gmail sign-in is required to send your daily Jury picks email.',
+      needsReauth: true,
+    });
+    return;
+  }
+
+  const prefRow = getEmailPreferenceRow();
+  const requestedEmail =
+    typeof req.body?.recipientEmail === 'string' && req.body.recipientEmail.trim()
+      ? req.body.recipientEmail.trim()
+      : prefRow.recipient_email;
+
+  if (!isValidRecipientEmail(requestedEmail)) {
+    res.status(400).json({
+      error: 'Please enter a valid recipient email address before sending.',
+    });
+    return;
+  }
+
+  const profile = getProfileRow();
+  const topPicks = getTopEmailPicks(profile);
+  if (topPicks.length === 0) {
+    res.status(400).json({
+      error: 'No eligible Jury job picks are currently available to email. Try convening the Jury first.',
+    });
+    return;
+  }
+
+  const latestDeliberation = (db
+    .prepare('SELECT * FROM deliberations ORDER BY created_at DESC LIMIT 1')
+    .get() || null) as unknown as DeliberationSession | null;
+
+  const todayDate = new Date().toISOString().slice(0, 10);
+  const nowIso = new Date().toISOString();
+  const appOrigin =
+    typeof req.headers.origin === 'string' && /^https?:\/\//i.test(req.headers.origin)
+      ? req.headers.origin
+      : undefined;
+
+  try {
+    const built = buildDailyJuryDigestEmail({
+      recipientEmail: requestedEmail,
+      dateLabel: todayDate,
+      profile,
+      picks: topPicks,
+      deliberation: latestDeliberation,
+      appUrl: appOrigin,
+    });
+
+    const gmailResult = await sendGmailRawMessage({
+      accessToken,
+      rawBase64Url: built.rawBase64Url,
+    });
+
+    db.prepare(
+      `UPDATE email_preferences
+       SET recipient_email=?, last_sent_date=?, last_sent_at=?, last_sent_count=?, last_subject=?, last_error='', updated_at=?
+       WHERE id=1`
+    ).run(
+      sanitizeHeaderValue(requestedEmail, 254),
+      todayDate,
+      nowIso,
+      built.sentCount,
+      built.subject,
+      nowIso
+    );
+
+    const status = getEmailStatusPayload();
+    res.json({
+      ok: true,
+      messageId: gmailResult.id,
+      recipientEmail: requestedEmail,
+      subject: built.subject,
+      sentCount: built.sentCount,
+      sentAt: nowIso,
+      status,
+      message: `Sent Top ${built.sentCount} Jury Job Picks email to ${requestedEmail}.`,
+    });
+  } catch (err) {
+    const errObj = err as { status?: number; needsReauth?: boolean; message?: string };
+    const httpStatus = errObj?.status === 401 || errObj?.status === 403 ? errObj.status : 502;
+    const message = sanitizeHeaderValue(
+      errObj?.message || 'Unable to send email through Gmail.',
+      240
+    );
+
+    db.prepare('UPDATE email_preferences SET last_error=?, updated_at=? WHERE id=1').run(message, nowIso);
+    res.status(httpStatus).json({
+      error: errObj?.needsReauth
+        ? 'Your Gmail session needs fresh permission. Click "Sign in with Google" to reconnect Gmail and retry.'
+        : message,
+      needsReauth: Boolean(errObj?.needsReauth),
+    });
+  }
 });
 
 function ensureDaily24hDeliberation() {

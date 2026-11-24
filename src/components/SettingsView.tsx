@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { RefreshCw, RotateCcw, Scale } from 'lucide-react';
-import type { SettingsResponse } from '../types.ts';
+import type { EmailDigestStatus, SettingsResponse } from '../types.ts';
+import { DailyEmailPanel } from './DailyEmailPanel.tsx';
 import { JuryMatchTrendChart } from './JuryMatchTrendChart.tsx';
 
 interface SettingsViewProps {
@@ -8,6 +9,12 @@ interface SettingsViewProps {
   isConvening: boolean;
   onNotify: (message: string) => void;
   refreshSignal: number;
+  emailStatus: EmailDigestStatus | null;
+  defaultEmail: string;
+  hasGmailPermission: boolean;
+  onConnectGmail: () => Promise<string | null>;
+  onSaveEmailPreferences: (enabled: boolean, recipientEmail: string) => Promise<void>;
+  onRequestEmailModal: () => void;
 }
 
 export function SettingsView({
@@ -15,6 +22,12 @@ export function SettingsView({
   isConvening,
   onNotify,
   refreshSignal,
+  emailStatus,
+  defaultEmail,
+  hasGmailPermission,
+  onConnectGmail,
+  onSaveEmailPreferences,
+  onRequestEmailModal,
 }: SettingsViewProps) {
   const [data, setData] = useState<SettingsResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -115,6 +128,16 @@ export function SettingsView({
 
       {/* Firebase-Synced Recharts Job Match Trend Visualization */}
       <JuryMatchTrendChart />
+
+      {/* Daily Top Jury Job Picks Email Delivery */}
+      <DailyEmailPanel
+        status={emailStatus}
+        defaultEmail={defaultEmail}
+        hasGmailPermission={hasGmailPermission}
+        onConnectGmail={onConnectGmail}
+        onSavePreferences={onSaveEmailPreferences}
+        onRequestSendModal={onRequestEmailModal}
+      />
 
       {/* Behavioral Learning Summary */}
       <section className="bg-white border border-slate-200 rounded-xl p-6 space-y-6">

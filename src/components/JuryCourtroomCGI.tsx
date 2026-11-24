@@ -104,7 +104,16 @@ export function JuryCourtroomCGI({
 
   // Build richer courtroom trial docket (up to 10 cases: Top 5 Picks + up to 5 Rejected / Constrained / Dismissed roles)
   const topCases = useMemo(() => {
-    const picks = items.filter((i) => i.job.is_daily_pick === 1 && i.job.status !== 'dismissed').slice(0, 5);
+    const seenSig = new Set<string>();
+    const picks = items
+      .filter((i) => {
+        if (i.job.is_daily_pick !== 1 || i.job.status !== 'new') return false;
+        const sig = `${(i.job.company || '').trim().toLowerCase()}::${(i.job.title || '').trim().toLowerCase()}`;
+        if (seenSig.has(sig)) return false;
+        seenSig.add(sig);
+        return true;
+      })
+      .slice(0, 5);
     const pickIds = new Set(picks.map((p) => p.job.id));
     const rejected = items
       .filter((i) => !pickIds.has(i.job.id) && isCaseRejected(i))

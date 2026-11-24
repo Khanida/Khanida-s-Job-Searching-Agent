@@ -9,11 +9,12 @@ import { SettingsView } from './components/SettingsView.tsx';
 import { JobDetailDrawer } from './components/JobDetailDrawer.tsx';
 import { RejectModal } from './components/RejectModal.tsx';
 import { ApplicationModal } from './components/ApplicationModal.tsx';
+import { EmailDigestConfirmModal } from './components/EmailDigestConfirmModal.tsx';
 import { OnboardingWalkthrough } from './components/OnboardingWalkthrough.tsx';
 import { SALARY_SLIDER_MAX, SALARY_SLIDER_MIN } from './components/SalaryRangeSlider.tsx';
 import { AuthProvider, useAuth } from './contexts/AuthContext.tsx';
 import { syncJobActionToCloud, syncLearnedWeightsToCloud } from './firebase.ts';
-import type { DashboardResponse, JobItem, JobStatus } from './types.ts';
+import type { DashboardResponse, EmailDigestStatus, JobItem, JobStatus } from './types.ts';
 
 const WALKTHROUGH_STORAGE_KEY = 'adeena_job_agent_tour_v1';
 
@@ -26,7 +27,16 @@ function AppWorkspace({
   refreshSignal: number;
   triggerRefresh: () => void;
 }) {
-  const { user, cloudError, recordJurySnapshot } = useAuth();
+  const {
+    user,
+    cloudError,
+    hasGmailPermission,
+    gmailAccessToken,
+    connectGmail,
+    clearGmailToken,
+    recordJurySnapshot,
+    syncEmailPref,
+  } = useAuth();
   const [activeTab, setActiveTab] = useState<NavTab>('overview');
 
   // Overview state
@@ -51,6 +61,8 @@ function AppWorkspace({
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [rejectTarget, setRejectTarget] = useState<JobItem | null>(null);
   const [applicationJobId, setApplicationJobId] = useState<string | null>(null);
+  const [emailStatus, setEmailStatus] = useState<EmailDigestStatus | null>(null);
+  const [emailModalOpen, setEmailModalOpen] = useState(false);
 
   // Global actions & feedback
   const [isConvening, setIsConvening] = useState(false);
@@ -149,6 +161,100 @@ function AppWorkspace({
   useEffect(() => {
     void fetchDashboard(false);
   }, [fetchDashboard, refreshSignal]);
+
+  const fetchEmailStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/email/status');
+      if (!res.ok) return;
+      const payload = (await res.json()) as EmailDigestStatus;
+      setEmailStatus(payload);
+    } catch {
+      // Ignore transient email status errors
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetchEmailStatus();
+  }, [fetchEmailStatus, refreshSignal, user?.uid]);
+
+  const autoPromptedDateRef = useRef<string>('');
+  useEffect(() => {
+    if (
+      emailStatus?.dueToday &&
+      hasGmailPermission &&
+      autoPromptedDateRef.current !== emailStatus.todayDate &&
+      !emailModalOpen
+    ) {
+      autoPromptedDateRef.current = emailStatus.todayDate;
+      setEmailModalOpen(true);
+    }
+  }, [emailModalOpen, emailStatus, hasGmailPermission]);
+
+  const handleSaveEmailPreferences = useCallback(
+    async (enabled: boolean, recipientEmail: string) => {
+      const res = await fetch('/api/email/preferences', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled, recipientEmail }),
+      });
+      const payload = await res.json();
+      if (!res.ok) throw new Error(payload.error || 'Failed to save email settings.');
+      if (payload.status) {
+        setEmailStatus(payload.status);
+        if (user) {
+          void syncEmailPref({
+            enabled: payload.status.enabled,
+            recipientEmail: payload.status.recipientEmail,
+            lastSentDate: payload.status.lastSentDate,
+            lastSubject: payload.status.lastSubject,
+            lastSentCount: payload.status.lastSentCount,
+          });
+        }
+      }
+      notify(payload.message || 'Saved email preferences.');
+    },
+    [notify, syncEmailPref, user]
+  );
+
+  const handleConfirmSendDailyEmail = useCallback(
+    async (recipientEmail: string) => {
+      const token = gmailAccessToken || (await connectGmail());
+      if (!token) {
+        throw new Error('Google Gmail sign-in is required before sending.');
+      }
+
+      const res = await fetch('/api/email/send-daily-picks', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ recipientEmail }),
+      });
+      const payload = await res.json();
+      if (!res.ok) {
+        if (payload.needsReauth) {
+          clearGmailToken();
+        }
+        throw new Error(payload.error || 'Unable to send daily Jury picks email.');
+      }
+
+      if (payload.status) {
+        setEmailStatus(payload.status);
+        if (user) {
+          void syncEmailPref({
+            enabled: payload.status.enabled,
+            recipientEmail: payload.status.recipientEmail,
+            lastSentDate: payload.status.lastSentDate,
+            lastSubject: payload.status.lastSubject,
+            lastSentCount: payload.status.lastSentCount,
+          });
+        }
+      }
+      notify(payload.message || `Sent daily Jury picks email to ${recipientEmail}.`);
+    },
+    [clearGmailToken, connectGmail, gmailAccessToken, notify, syncEmailPref, user]
+  );
 
   const handleTrackClick = useCallback(
     (jobId: string, eventType: ClickEventType = 'click') => {
@@ -322,7 +428,7 @@ function AppWorkspace({
         return;
       }
 
-      if (walkthroughOpen || selectedJobId || rejectTarget || applicationJobId) {
+      if (walkthroughOpen || selectedJobId || rejectTarget || applicationJobId || emailModalOpen) {
         return;
       }
 
@@ -344,7 +450,7 @@ function AppWorkspace({
 
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
-  }, [walkthroughOpen, selectedJobId, rejectTarget, applicationJobId]);
+  }, [walkthroughOpen, selectedJobId, rejectTarget, applicationJobId, emailModalOpen]);
 
   const activeError = errorBanner || cloudError;
 
@@ -466,6 +572,12 @@ function AppWorkspace({
             onTrackClick={handleTrackClick}
             onConveneJury={() => void handleConveneJury(false)}
             onNavigateTab={(tab) => setActiveTab(tab)}
+            emailStatus={emailStatus}
+            defaultEmail={user?.email || 'khanzadaaneeda@gmail.com'}
+            hasGmailPermission={hasGmailPermission}
+            onConnectGmail={connectGmail}
+            onSaveEmailPreferences={handleSaveEmailPreferences}
+            onRequestEmailModal={() => setEmailModalOpen(true)}
           />
         )}
 
@@ -497,6 +609,12 @@ function AppWorkspace({
             isConvening={isConvening}
             onNotify={notify}
             refreshSignal={refreshSignal}
+            emailStatus={emailStatus}
+            defaultEmail={user?.email || 'khanzadaaneeda@gmail.com'}
+            hasGmailPermission={hasGmailPermission}
+            onConnectGmail={connectGmail}
+            onSaveEmailPreferences={handleSaveEmailPreferences}
+            onRequestEmailModal={() => setEmailModalOpen(true)}
           />
         )}
       </main>
@@ -529,6 +647,16 @@ function AppWorkspace({
         jobId={applicationJobId}
         onClose={() => setApplicationJobId(null)}
         onNotify={notify}
+      />
+
+      <EmailDigestConfirmModal
+        open={emailModalOpen}
+        status={emailStatus}
+        defaultEmail={user?.email || 'khanzadaaneeda@gmail.com'}
+        hasGmailPermission={hasGmailPermission}
+        onConnectGmail={connectGmail}
+        onConfirmSend={handleConfirmSendDailyEmail}
+        onClose={() => setEmailModalOpen(false)}
       />
 
       <OnboardingWalkthrough
